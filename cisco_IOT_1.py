@@ -6,6 +6,7 @@ import sys
 import os
 import csv
 import time
+import string
 from collections import defaultdict
 from datetime import date, datetime
 from cryptography.fernet import Fernet
@@ -13,6 +14,107 @@ import logging
 
 # disable the warnings for ignoring Self Signed Certificates
 requests.packages.urllib3.disable_warnings()
+
+def customer_menu(ng1_host, headers, cookies, apn_list):
+    # This function is an entry menu for entering new customer information.
+    # It takes in a list of valid APNs and returns the user's entries as a profile dictionary.
+    # Return False if the user messes up and wants to start over
+    # Create an empty dictionary that will hold our customer menu entries.
+    profile = {}
+    # Create an empty list that will contain one or more APN entries.
+    apn_entry_list = []
+    # Initialize a variable to capture a user's yes or no reponse.
+    user_entry = ''
+    acceptable_responses = ['y', 'yes', 'n', 'no', 'exit']
+    print('This program takes input for customer attributes and creates a full configuration in nG1 to match')
+    print("To cancel any changes, please type 'exit'")
+    # Take the users input and verify that all APNs entered are valid, meaning they already exist.
+
+    # User enters the customer name.
+    user_entry = input("Please enter the Customer Name :")
+    if user_entry == '':
+        profile['cust_name'] = 'Ring'
+    elif user_entry.lower() == 'exit':
+        exit()
+    else:
+        profile['cust_name'] = user_entry
+
+    # User enters one or more APNs.
+    while True:
+        # User enters the APN(s)
+        user_entry = input("Please enter an APN :")
+        if user_entry == '':
+            user_entry = 'Ring'
+        elif user_entry.lower() == 'exit':
+            exit()
+
+        if user_entry not in apn_list:
+            print(f"APN: {user_entry} does not yet exist")
+            print(f"Please create APN: {user_entry} first and then run this program again")
+            print("No nG1 modifications will be made. Exiting...")
+            exit()
+        else:
+            apn_entry_list.append(user_entry)
+
+        while True:
+            user_entry = input("Enter another APN? (y or n): ").lower()
+            if user_entry not in acceptable_responses:
+                print("Invalid entry, please enter either 'y' or 'n'")
+                continue
+            else:
+                break
+
+        if user_entry == 'exit':
+            exit()
+        elif user_entry == 'n' or user_entry == 'no':
+            profile['apn_list'] = apn_entry_list
+            break
+        elif user_entry == 'y' or user_entry == 'yes':
+            continue
+
+
+    print('Please select the customer type:')
+    print('[1] IOT')
+    print('[2] Connected Car')
+    while True:
+        user_entry = input('Enter 1 or 2: ').lower()
+        if user_entry == 'exit':
+            exit()
+        elif user_entry == '':
+            profile['customer_type'] = 'IOT'
+            break
+        elif user_entry == '1':
+            profile['customer_type'] = 'IOT'
+            break
+        elif user_entry == '2':
+            profile['customer_type'] = 'Connected Car'
+            break
+        else:
+            print("Invalid entry, please enter either '1' or '2'")
+            continue
+
+    print('-------------------------------------------')
+    print('Confirm new customer profile:')
+    print(f"Customer Name: {profile['cust_name']}")
+    for apn in apn_list:
+        print(f"APN: {apn}")
+    print(f"Customer Type: {profile['customer_type']}")
+    print('-------------------------------------------')
+    print("Enter 'y' to proceed with nG1 configuration")
+    print("Enter 'n' to start over")
+    print("Enter 'exit' to exit without configuration changes")
+    while True:
+        user_entry = input('y or n: ').lower()
+        if user_entry == 'y':
+            return profile
+        elif user_entry == 'n':
+            return False
+        elif user_entry == 'exit':
+            exit()
+        else:
+            print("Invalid entry, please enter 'y' or 'n'")
+            continue
+
 
 def open_session(ng1_host, headers, cookies, credentials):
     open_session_uri = "/ng1api/rest-sessions"
@@ -1147,16 +1249,25 @@ cookies = open_session(ng1_host, headers, cookies, credentials)
 # Delete a specific domain
 # delete_domain(ng1_host, domain_name, headers, cookies)
 
-#service_name = 'Atlanta'
-#config_data = get_domain_detail(ng1_host, service_name, headers, cookies)
+#service_name = 'Web App Group'
+#config_data = get_service_detail(ng1_host, service_name, headers, cookies)
 #pprint.pprint(config_data)
 #exit()
 
-# Get the car manufacturer from the user
-car_co = input("Please enter the name of the vehicle manufacturer :")
-if car_co == '':
-    car_co = 'Tesla'
-
+# Hardcode a list of known good APNs that the customer input will need to match up
+apn_list = ['Ring', 'Onstar1', 'Onstar2']
+# Get the new customer profile from the user
+while True:
+    profile = customer_menu(ng1_host, headers, cookies, apn_list)
+    if profile != False:
+        print(f"Profile is : {profile}")
+        break
+    # If the user does not confirm the new customer profile, let them start over
+    else:
+        print('New customer profile discarded, starting over...')
+        print('')
+        continue
+exit()
 #Lists of existing network services we intend to use. Could pull this from a file.
 network_service_list = ['Atlanta', 'Phoenix', 'San Jose']
 network_service_ids = {}
@@ -1191,7 +1302,6 @@ for network_service in network_service_list:
                                         'protocolOrGroupCode': app_serv}],
                     'serviceName': application_service_name,
                     'serviceType': 1}]}
-
         # Write the config_data to a JSON configuration file.
         write_config_to_json(config_type, 'Null', application_service_name, 'Null', 'Null', 'Null', 'Null', app_srv_config_data)
         # Create the new app service.
@@ -1202,6 +1312,38 @@ for network_service in network_service_list:
         # Add this app service id to our dictionary so we can use it later to assign domain members.
         app_service_ids[application_service_name] = app_srv_id
 
+# Create the App Services 'Web App Group' to be used by the User Donmain
+# Create one for each network service
+for network_service in network_service_list:
+    application_service_name = 'Web App Group ' + network_service
+    # Fetch the network service id number from our list network_service_ids
+    net_srv_id = network_service_ids[network_service] = net_srv_id
+    app_srv_config_data = {'serviceDetail': [{'alertProfileID': 1,
+            'exclusionListID': -1,
+            'id': -1,
+            'isAlarmEnabled': False,
+            'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
+            'serviceMembers': [{'enableAlert': False,
+                                'interfaceNumber': -1,
+                                'isNetworkDomain': True,
+                                'isProtocolGroup': True,
+                                'melID': -1,
+                                'networkDomainID': net_srv_id,
+                                'networkDomainName': network_service,
+                                'protocolOrGroupCode': 'WEB'}],
+            'serviceName': application_service_name,
+            'serviceType': 1}]}
+    # Write the config_data to a JSON configuration file.
+    write_config_to_json(config_type, 'Null', application_service_name, 'Null', 'Null', 'Null', 'Null', app_srv_config_data)
+    # Create the new app service.
+    create_service(ng1_host, service_type, application_service_name, headers, cookies)
+    # We need to know the id number that was assigned to this new app service.
+    app_srv_config_data = get_service_detail(ng1_host, application_service_name, headers, cookies)
+    app_srv_id = app_srv_config_data['serviceDetail'][0]['id']
+    # Add this app service id to our dictionary so we can use it later to assign domain members.
+    app_service_ids[application_service_name] = app_srv_id
+
+exit()
 
 # Create an empty domain under the root "Enterprise".
 domain_name = 'Cisco IOT'
