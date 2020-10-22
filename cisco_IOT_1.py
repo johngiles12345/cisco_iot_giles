@@ -15,7 +15,7 @@ import logging
 # disable the warnings for ignoring Self Signed Certificates
 requests.packages.urllib3.disable_warnings()
 
-def customer_menu(ng1_host, headers, cookies, apn_list):
+def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
     # This function is an entry menu for entering new customer information.
     # It takes in a list of valid APNs and returns the user's entries as a profile dictionary.
     # Return False if the user messes up and wants to start over
@@ -25,13 +25,12 @@ def customer_menu(ng1_host, headers, cookies, apn_list):
     apn_entry_list = []
     # Initialize a variable to capture a user's yes or no reponse.
     user_entry = ''
-    acceptable_responses = ['y', 'yes', 'n', 'no', 'exit']
-    print('This program takes input for customer attributes and creates a full configuration in nG1 to match')
+    print('\nThis program takes input for customer attributes and creates a full configuration in nG1 to match')
     print("To cancel any changes, please type 'exit'")
     # Take the users input and verify that all APNs entered are valid, meaning they already exist.
 
     # User enters the customer name.
-    user_entry = input("Please enter the Customer Name :")
+    user_entry = input("Please enter the Customer Name: ")
     if user_entry == '':
         profile['cust_name'] = 'Ring'
     elif user_entry.lower() == 'exit':
@@ -39,38 +38,36 @@ def customer_menu(ng1_host, headers, cookies, apn_list):
     else:
         profile['cust_name'] = user_entry
 
-    # User enters one or more APNs.
-    while True:
-        # User enters the APN(s)
-        user_entry = input("Please enter an APN :")
-        if user_entry == '':
-            user_entry = 'Ring'
-        elif user_entry.lower() == 'exit':
-            exit()
+    print("\nCurrent APNs available are: ")
+    print(sorted(apn_list), '\n')
 
-        if user_entry not in apn_list:
+    # Initialize an empty list to hold user entered APNs
+    apn_entry_list = []
+    # User enters one or more APNs.
+    # User enters the APN(s)
+    user_entry = input("Please enter one or more APNs from the list separated by comma: ")
+    if user_entry == '':
+        # For testing, allow the user to just hit enter
+        apn_entry_list.append('Ring')
+    elif user_entry.lower() == 'exit':
+        exit()
+    else:
+        # If more than one APN is entered, split the string into a list of APNs
+        apn_entry_list = user_entry.split(',')
+        # Remove any leading or trailing whitespace from list members
+        i = 0
+        for apn_entry in apn_entry_list:
+            apn_entry_list[i] = apn_entry.strip()
+            i += 1
+
+    for apn_entry in apn_entry_list:
+        if apn_entry not in apn_list:
             print(f"APN: {user_entry} does not yet exist")
             print(f"Please create APN: {user_entry} first and then run this program again")
             print("No nG1 modifications will be made. Exiting...")
             exit()
-        else:
-            apn_entry_list.append(user_entry)
 
-        while True:
-            user_entry = input("Enter another APN? (y or n): ").lower()
-            if user_entry not in acceptable_responses:
-                print("Invalid entry, please enter either 'y' or 'n'")
-                continue
-            else:
-                break
-
-        if user_entry == 'exit':
-            exit()
-        elif user_entry == 'n' or user_entry == 'no':
-            profile['apn_list'] = apn_entry_list
-            break
-        elif user_entry == 'y' or user_entry == 'yes':
-            continue
+    profile['apn_list'] = apn_entry_list
 
 
     print('Please select the customer type:')
@@ -81,6 +78,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list):
         if user_entry == 'exit':
             exit()
         elif user_entry == '':
+            # For testing, allow the user to just hit enter
             profile['customer_type'] = 'IOT'
             break
         elif user_entry == '1':
@@ -93,12 +91,43 @@ def customer_menu(ng1_host, headers, cookies, apn_list):
             print("Invalid entry, please enter either '1' or '2'")
             continue
 
+    print("\nCurrent Datacenters available are: ")
+    print(sorted(datacenter_list), '\n')
+    # Initialize an empty list to hold user entered datacenters
+    dc_entry_list = []
+    # User enters one or more Datacenters.
+    user_entry = input("Please enter one or more Datacenters from the list separated by comma: ")
+    if user_entry == '':
+        # For testing, allow the user to just hit enter
+        dc_entry_list.append('Atlanta')
+    elif user_entry.lower() == 'exit':
+        exit()
+    else:
+        # If more than one datacenter is entered, split the string into a list of datacenters
+        dc_entry_list = user_entry.split(',')
+        # Remove any leading or trailing whitespace from list members
+        i = 0
+        for dc_entry in dc_entry_list:
+            dc_entry_list[i] = dc_entry.strip()
+            i += 1
+
+    for dc_entry in dc_entry_list:
+        if dc_entry not in datacenter_list:
+            print(f"Datacenter: {dc_entry} does not yet exist")
+            print(f"Please create Datacenter: {dc_entry} first and then run this program again")
+            print("No nG1 modifications will be made. Exiting...")
+            exit()
+
+    profile['dc_list'] = dc_entry_list
+
     print('-------------------------------------------')
     print('Confirm new customer profile:')
     print(f"Customer Name: {profile['cust_name']}")
-    for apn in apn_list:
+    for apn in apn_entry_list:
         print(f"APN: {apn}")
     print(f"Customer Type: {profile['customer_type']}")
+    for dc in dc_entry_list:
+        print(f"Datacenter: {dc}")
     print('-------------------------------------------')
     print("Enter 'y' to proceed with nG1 configuration")
     print("Enter 'n' to start over")
@@ -221,6 +250,8 @@ def write_config_to_json(config_type, service_type, service_name, app_name, devi
             config_filename = 'all_net_services' + '.json'
         else:
             config_filename = 'all_services' + '.json'
+    elif config_type == 'get_apns':
+        config_filename = service_name + '.json'
     elif config_type == 'get_devices':
         config_filename = 'all_devices' + '.json'
     elif config_type == 'get_applications':
@@ -312,7 +343,7 @@ def read_config_from_json(config_type, service_type, service_name, app_name, dev
         else:
             print('Unable to determine the json filename')
             print('service_type must be set to application, network or all_services')
-            return False
+            return False, False
     elif config_type == 'get_service_detail':
         config_filename = service_name + '.json'
     elif config_type == 'create_service' or config_type == 'create_domain':
@@ -325,6 +356,10 @@ def read_config_from_json(config_type, service_type, service_name, app_name, dev
         config_filename = app_name + '.json'
     elif config_type == 'create_app':
         config_filename = app_name  + '.json'
+    elif config_type == 'get_datacenters':
+        config_filename = service_name  + '.json'
+    elif config_type == 'set_apns':
+        config_filename = 'apn-list'  + '.json'
     elif config_type == 'get_device_interfaces':
         config_filename = 'device_' + device_name + '_interfaces' + '.json'
     elif config_type == 'get_device_interface_locations':
@@ -340,7 +375,7 @@ def read_config_from_json(config_type, service_type, service_name, app_name, dev
     else:
         print('Unable to determine filename to read')
         print('No match for config_type')
-        return False
+        return False, False
 
     try:
         with open(config_filename) as f:
@@ -352,11 +387,11 @@ def read_config_from_json(config_type, service_type, service_name, app_name, dev
     except IOError as e:
         print(f'[FAIL] Unable to read the JSON config file:', config_filename)
         print("I/O error({0}): {1}".format(e.errno, e.strerror))
-        return False
+        return False, False
     except: #handle other exceptions such as attribute errors
         print(f'[FAIL] Unable to read the JSON config file:', config_filename)
         print("Unexpected error:", sys.exc_info()[0])
-        return False
+        return False, False
 
 def get_applications(ng1_host, headers, cookies):
     app_uri = "/ng1api/ncm/applications/"
@@ -586,6 +621,88 @@ def delete_app(ng1_host, app_name, headers, cookies):
 
         return False
 
+def get_apns(ng1_host, headers, cookies):
+    uri = "/ng1api/ncm/apns/"
+    url = "https://" + ng1_host + uri
+
+    # perform the HTTPS API call to get the All APNs information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_apns Successful')
+
+        # return the json object that contains the All APNs information
+        return get.json()
+
+    else:
+        print('[FAIL] get_apns Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
+def get_apn_detail(ng1_host, headers, cookies, apn_name):
+    uri = "/ng1api/ncm/apns/"
+    url = "https://" + ng1_host + uri + apn_name
+
+    # perform the HTTPS API call to get the APN detail information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_apn_detail for', apn_name, 'Successful')
+
+        # return the json object that contains the APN detail information
+        return get.json()
+
+    else:
+        print('[FAIL] get_apn_detail for', apn_name, 'Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
+def set_apns(ng1_host, headers, cookies):
+    # Add a list of APN groups to nG1 based on an existing json file definition
+    # Set the read_config_from_json parameters to "Null" that we don't need
+    config_type = 'set_apns'
+    app_name = 'Null'
+    device_name = 'Null'
+    interface_id = 'Null'
+    location_name = 'Null'
+    service_uri = "/ng1api/ncm/apns/"
+
+    # Read in the json file to get all the service attributes
+    service_data, config_filename = read_config_from_json(config_type, service_type, service_name, app_name, device_name, interface_id, location_name)
+    url = "https://" + ng1_host + service_uri
+
+    # use json.dumps to provide a serialized json object (a string actually)
+    # this json_string will become our new configuration for this service_name
+    json_string = json.dumps(service_data)
+    # print('New service data =')
+    # print(json_string)
+
+    # perform the HTTPS API Post call with the serialized json object service_data
+    # this will create the apn group configuration in nG1 for this apn_filename (the new service_name)
+    post = requests.post(url, headers=headers, data=json_string, verify=False, cookies=cookies)
+
+    if post.status_code == 200:
+        # success
+        print('[INFO] set_apns Successful')
+        return True
+
+    else:
+        print('[FAIL] set_apns Failed')
+        print('URL:', url)
+        print('Response Code:', post.status_code)
+        print('Response Body:', post.text)
+
+        return False
+
+
 def get_domains(ng1_host, headers, cookies):
     service_uri = "/ng1api/ncm/domains/"
     url = "https://" + ng1_host + service_uri
@@ -709,6 +826,26 @@ def get_devices(ng1_host, headers, cookies):
 
         return False
 
+def get_device_detail(ng1_host, headers, cookies, device_name):
+    uri = "/ng1api/ncm/devices/"
+    url = "https://" + ng1_host + uri + device_name
+    # perform the HTTPS API call to get the device information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_device_detail request for', device_name, 'Successful')
+
+        # return the json object that contains the device information
+        return get.json()
+
+    else:
+        print('[FAIL] get_device_detail request for', device_name, 'failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
 
 def get_services(ng1_host, service_type, headers, cookies):
     service_uri = "/ng1api/ncm/services/"
@@ -1162,41 +1299,41 @@ else:
 #ng1_host = ng1destination + ':' + ng1destPort
 ng1_host = ng1destination
 # Supply the name of the service to use on get_service_detail, update_service, delete_service or create_service
-service_name = 'app_service_gilestest'
+#service_name = 'app_service_gilestest'
 
 # Supply the name of the dashboard domain to use on get_domain_detail, update_domain, delete_domain or create_domain
-domain_name = 'Cisco IOT'
+#domain_name = 'Cisco IOT'
 
 # Supply the type of service to get from get_services (application, network or all).
-service_type = 'get_domain_detail'
+#service_type = 'get_domain_detail'
 
 # Supply the name of the application to use on get_app_detail, update_app, delete_app or create_app
-app_name = 'MyHTTPSApp'
+#app_name = 'MyHTTPSApp'
 # app_name = '10-8-8-APP'
 
 # Supply the device name for get_device, update_device, get_device_interfaces, get_device_interface, get_device_interface_locations, get_device_interface_location
-device_name = 'isng4795'
+#device_name = 'isng4795'
 # device_name = "usden01mgmtnif01"
 
 # Supply the interface number for get_device_interface or get_device_interface_location, get_device_interface_locations
-interface_id = "3"
+#interface_id = "3"
 
 # Supply the attribute and attribute_value that you want to pass into one of the update functions
-attribute = 'responseTime'
-attribute_value = 'Disabled'
+#attribute = 'responseTime'
+#attribute_value = 'Disabled'
 
 # Supply the name of the location for get_device_interface_location
-location_name = "Boston Division"
+#location_name = "Boston Division"
 
 # supply the the me_name and protocol_or_group_code for update_service
-me_name = 'isng4795:if3'
-protocol_or_group_code = 'HTTP'
+#me_name = 'isng4795:if3'
+#protocol_or_group_code = 'HTTP'
 
 # Supply the type of config request you are making
 # get_device, get_devices, get_services, get_service_detail, get_device_interface
 # get_device_interfaces, get_device_interface_location, get_device_interface_locations
 # config_type = "get_service_detail"
-config_type = 'get_domain_detail'
+#config_type = 'get_domain_detail'
 
 # specify the headers to use in the API call
 headers = {
@@ -1249,16 +1386,43 @@ cookies = open_session(ng1_host, headers, cookies, credentials)
 # Delete a specific domain
 # delete_domain(ng1_host, domain_name, headers, cookies)
 
-#service_name = 'Web App Group'
+# Set all APN locations based on a filename apn-list.json
+#set_apns(ng1_host, headers, cookies)
+#exit()
+
+# Initialize an empty apn list that we will use later to verify user input
+apn_list = []
+# Get info on all APN locations
+apn_configs = get_apns(ng1_host, headers, cookies)
+if apn_configs != False:
+    for apn in apn_configs["apns"]:
+        apn_name = apn["name"]
+        apn_list.append(apn_name)
+else:
+    print('Unable to fetch APNs, exiting....')
+    exit()
+
+# Initialize an empty datacenter list that we will use later to verify user input
+datacenter_list = ["Atlanta", "Phoenix", "San Jose", "Toronto", "Vancouver"]
+# Get info on all datacenters
+#datacenter_configs, config_filename = read_config_from_json('get_datacenters', 'Null', 'CiscoIOT-DataCenters', 'Null', 'Null', 'Null', 'Null')
+#if datacenter_configs != False:
+#    for datacenter in datacenter_configs["Data Centers"]:
+#        datacenter_name = datacenter["name"]
+#        datacenter_list.append(datacenter_name)
+#else:
+#    print('Unable to fetch Datacenter and Customers list, exiting....')
+#    exit()
+#print('DataCenter list is: ', datacenter_list)
+
+#service_name = 'All-NWS-Ring'
 #config_data = get_service_detail(ng1_host, service_name, headers, cookies)
 #pprint.pprint(config_data)
 #exit()
 
-# Hardcode a list of known good APNs that the customer input will need to match up
-apn_list = ['Ring', 'Onstar1', 'Onstar2']
 # Get the new customer profile from the user
 while True:
-    profile = customer_menu(ng1_host, headers, cookies, apn_list)
+    profile = customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list)
     if profile != False:
         print(f"Profile is : {profile}")
         break
@@ -1267,10 +1431,130 @@ while True:
         print('New customer profile discarded, starting over...')
         print('')
         continue
+
+# Fetch the APN id number that matches with each APN in the customer profile
+apn_ids = {}
+for apn_name in profile['apn_list']:
+    apn_config = get_apn_detail(ng1_host, headers, cookies, apn_name)
+    if apn_config != False:
+        apn_ids[apn_name] = apn_config['id']
+    else:
+        print('Unable to fetch APN ID number for ', apn_name)
+        print('Exiting...')
+        exit()
+
+# Create a network service for each APN specified that includes all availalbe MEs.
+# Start by just getting all interfaces on our one test vStream.
+net_service_ids = {}
+device_list = {"Atlanta" : ["", []], "Phoenix" : ["", []]}
+all_interfaces_data = []
+for device_name in device_list:
+    # We need the ip address of each device to fill in the network service members later.
+    device_detail = get_device_detail(ng1_host, headers, cookies, str(device_name))
+    if device_detail != False:
+        # Save the IP Address for each device in the devices list so that we can use them later.
+        device_list[device_name][0] = device_detail['deviceConfigurations'][0]['deviceIPAddress']
+        device_interfaces = get_device_interfaces(ng1_host, device_name, headers, cookies)
+        device_interfaces = device_interfaces['interfaceConfigurations']
+        # Save the current interface list for each device in the device_list to use later
+        device_list[device_name][1] = device_interfaces
+        # Accumulate a master dictionary that includes all interfaces for all devices
+        #print('\ndevice interfaces data', device_interfaces)
+        for item in device_interfaces:
+            all_interfaces_data.append(item)
+        #print('\nall interfaces data', all_interfaces_data)
+
+# Build the network services needed for each APN that the user specified for this new customer
+for apn_name in apn_ids:
+    # The first network service we will create is for All device interfaces for each apn specified
+    # The network service name takes the form of All-NWS-{apn_name}
+    # Initialize the dictionay that we will use to build up our network service definition.
+    net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
+    'exclusionListID': -1,
+    'id': -1,
+    'isAlarmEnabled': False,
+    'serviceName': 'All-NWS-' + apn_name,
+    'serviceType': 6}]}
+
+    # Add service members to the network service definition for each apn on every interface in the system
+    net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+    # So we must interate through the master list of all interfaces and add them to our network servce...
+    # as individual members.
+    for device_interface in all_interfaces_data:
+        net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+        'interfaceNumber': device_interface['interfaceNumber'],
+        'ipAddress': device_list[device_name][0],
+        'locationKeyInfo': [{'asi1xType': '',
+        'isLocationKey': True,
+        'keyAttr': apn_ids[apn_name],
+        'keyType': 4}],
+        'meAlias': device_interface['alias'],
+        'meName': device_interface['interfaceName']})
+
+    # Write the config_data to a JSON configuration file.
+    config_type = 'get_service_detail'
+    network_service_name = 'All-NWS-' + apn_name
+    write_config_to_json(config_type, 'Null', network_service_name, 'Null', 'Null', 'Null', 'Null', net_srv_config_data)
+    # Create the new network service.
+    create_service(ng1_host, 'Null', network_service_name, headers, cookies)
+    # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
+    net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
+    net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
+    # Add this network service id to our dictionary so we can use it later to assign domain members.
+    net_service_ids[network_service_name] = net_srv_id
+    #pprint.pprint(device_list)
+
+    # Now create a network service for each GSSN (All ISNG interfaces) for the datacenters that the user specified.
+    # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-All-GGSNs.
+    for datacenter in profile['dc_list']:
+        if datacenter.startswith('Atl'):
+            network_service_name = 'ATL-NWS-' + apn_name + '-All-GGSNs'
+        elif datacenter.startswith('Pho'):
+            network_service_name = 'PHX-NWS-' + apn_name + '-All-GGSNs'
+        elif datacenter.startswith('San'):
+            network_service_name = 'SJC-NWS-' + apn_name + '-All-GGSNs'
+        elif datacenter.startswith('Tor'):
+            network_service_name = 'TOR-NWS-' + apn_name + '-All-GGSNs'
+        elif datacenter.startswith('Van'):
+            network_service_name = 'VAN-NWS-' + apn_name + '-All-GGSNs'
+
+        # Initialize the dictionay that we will use to build up our network service definition.
+        net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
+        'exclusionListID': -1,
+        'id': -1,
+        'isAlarmEnabled': False,
+        'serviceName': network_service_name,
+        'serviceType': 6}]}
+
+        # Add service members to the network service definition for each apn on every interface for that single device
+        # This means that for each datacenter specified, we should have a list of network services for each...
+        # interface on that datacenter ISNG device. Each network service is the combination of the device interface...
+        # and the APN location
+        net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+
+        for device_interface in device_list[datacenter][1]:
+            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+            'interfaceNumber': device_interface['interfaceNumber'],
+            'ipAddress': device_list[datacenter][0],
+            'locationKeyInfo': [{'asi1xType': '',
+            'isLocationKey': True,
+            'keyAttr': apn_ids[apn_name],
+            'keyType': 4}],
+            'meAlias': device_interface['alias'],
+            'meName': device_interface['interfaceName']})
+
+        # Write the config_data to a JSON configuration file.
+        config_type = 'get_service_detail'
+        write_config_to_json(config_type, 'Null', network_service_name, 'Null', 'Null', 'Null', 'Null', net_srv_config_data)
+        # Create the new network service.
+        create_service(ng1_host, 'Null', network_service_name, headers, cookies)
+        # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
+        net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
+        net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
+        # Add this network service id to our dictionary so we can use it later to assign domain members.
+        net_service_ids[network_service_name] = net_srv_id
+        #pprint.pprint(net_service_ids)
 exit()
-#Lists of existing network services we intend to use. Could pull this from a file.
-network_service_list = ['Atlanta', 'Phoenix', 'San Jose']
-network_service_ids = {}
 #Lists of existing applications we intend to use. Could pull this from a file.
 app_service_list = ['GTPv0', 'GTPv1', 'GTPv2']
 app_service_ids = {}
@@ -1509,14 +1793,20 @@ for network_service in network_service_list:
 # Dectivate a specific application
 # deactivate_app(ng1_host, app_name, headers, cookies)
 
-# config_data = get_app_detail(ng1_host, app_name, headers, cookies)
-# pprint.pprint(config_data)
-
 # Delete a specific app
 # delete_app(ng1_host, app_name, headers, cookies)
 
 # Create a specific app
 # create_app(ng1_host, app_name, headers, cookies)
+
+# Set all APN locations based on a filename
+# set_apns(ng1_host, headers, cookies)
+
+# Get info on all APN locations
+# get_apns(ng1_host, headers, cookies)
+
+# Get info on a specific APN location
+# get_apn_detail(ng1_host, headers, cookies, apn_name)
 
 # Read the JSON configuration file and create a JSON object we can parse
 # If you are reading multiple services, devices, etc. then the service_name, device_name
