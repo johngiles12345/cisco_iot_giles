@@ -415,7 +415,7 @@ def get_applications(ng1_host, headers, cookies):
 
         return False
 
-def get_app_detail(ng1_host, app_name, headers, cookies):
+def get_app_detail(ng1_host, headers, cookies, app_name):
     service_uri = "/ng1api/ncm/applications/"
     url = "https://" + ng1_host + service_uri + app_name
 
@@ -442,7 +442,7 @@ def update_app(ng1_host, app_name, attribute, attribute_value, headers, cookies)
     url = "https://" + ng1_host + service_uri + app_name
 
     # First we will pull the details of the app and then update the desired field
-    app_data = get_app_detail(ng1_host, app_name, headers, cookies)
+    app_data = get_app_detail(ng1_host, headers, cookies, app_name)
     # Next, we need to determine the applicationType as the different types require
     # different mandatory fields in the input app_data
     application_type = app_data["applicationConfigurations"][0]["applicationType"]
@@ -500,7 +500,7 @@ def activate_app(ng1_host, app_name, headers, cookies):
     url = "https://" + ng1_host + service_uri + "activate"
 
     # First we will pull the details of the app to get the applicationTypeCode
-    app_data = get_app_detail(ng1_host, app_name, headers, cookies)
+    app_data = get_app_detail(ng1_host, headers, cookies, app_name)
     # Next, we need to determine the applicationTypeCode as the api post will require
     # us to pass in at least that info. We can also string together multiple applicationTypeCodes
     # if we wanted to activate a bunch of apps at once
@@ -531,7 +531,7 @@ def deactivate_app(ng1_host, app_name, headers, cookies):
     service_uri = "/ng1api/ncm/applications/"
     url = "https://" + ng1_host + service_uri + "deactivate"
     # First we will pull the details of the app to get the applicationTypeCode
-    app_data = get_app_detail(ng1_host, app_name, headers, cookies)
+    app_data = get_app_detail(ng1_host, headers, cookies, app_name)
     # Next, we need to determine the applicationTypeCode as the api post will require
     # us to pass in at least that info. We can also string together multiple applicationTypeCodes
     # if we wanted to deactivate a bunch of apps at once
@@ -1031,7 +1031,7 @@ def get_device(ng1_host, device_name, headers, cookies):
 
         return False
 
-def get_device_interfaces(ng1_host, device_name, headers, cookies):
+def get_device_interfaces(ng1_host, headers, cookies, device_name):
     device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces"
     url = "https://" + ng1_host + device_uri
     # perform the HTTPS API call to get the device information
@@ -1052,12 +1052,12 @@ def get_device_interfaces(ng1_host, device_name, headers, cookies):
 
         return False
 
-def get_device_interface(ng1_host, device_name, interface_id, headers, cookies):
-    device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces"
+def get_device_interface(ng1_host, headers, cookies, device_name, interface_id):
+    device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces/" + interface_id
     url = "https://" + ng1_host + device_uri
-    params = interface_id
+    #params = interface_id
     # perform the HTTPS API call to get the device information
-    get = requests.get(url, headers=headers, verify=False, cookies=cookies, params=params)
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
     if get.status_code == 200:
         # success
@@ -1196,7 +1196,7 @@ def device_menu(ng1_host, headers, cookies):
 def get_devices_interfaces_vlans_sorted(ng1_host, device_name, headers, cookies):
 
     # For the device_name, get info on all the interfaces on that Device
-    interfaces_data = get_device_interfaces(ng1_host, device_name, headers, cookies)
+    interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
     # Create a list of dictionaries that we can interate over
     interfaces_list = interfaces_data['interfaceConfigurations']
     # Initialize new lists that we can place our results into
@@ -1360,10 +1360,10 @@ cookies = open_session(ng1_host, headers, cookies, credentials)
 # pprint.pprint(device_data)
 
 # Get info on all the interface on a specific Device
-# interfaces_data = get_device_interfaces(ng1_host, device_name, headers, cookies)
+# interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
 # pprint.pprint(interfaces_data)
 
-# interface_data = get_device_interface(ng1_host, device_name, interface_id, headers, cookies)
+# interface_data = get_device_interface(ng1_host, headers, cookies, device_name, interface_id)
 # pprint.pprint(interface_data)
 
 # interface_locations = get_device_interface_locations(ng1_host, device_name, interface_id, headers, cookies)
@@ -1415,7 +1415,11 @@ datacenter_list = ["Atlanta", "Phoenix", "San Jose", "Toronto", "Vancouver"]
 #    exit()
 #print('DataCenter list is: ', datacenter_list)
 
-#service_name = 'All-NWS-Ring'
+#config_data = get_app_detail(ng1_host, headers, cookies, 'DNS')
+#pprint.pprint(config_data)
+#exit()
+
+#service_name = 'test_app'
 #config_data = get_service_detail(ng1_host, service_name, headers, cookies)
 #pprint.pprint(config_data)
 #exit()
@@ -1454,7 +1458,7 @@ for device_name in device_list:
     if device_detail != False:
         # Save the IP Address for each device in the devices list so that we can use them later.
         device_list[device_name][0] = device_detail['deviceConfigurations'][0]['deviceIPAddress']
-        device_interfaces = get_device_interfaces(ng1_host, device_name, headers, cookies)
+        device_interfaces = get_device_interfaces(ng1_host, headers, cookies, device_name)
         device_interfaces = device_interfaces['interfaceConfigurations']
         # Save the current interface list for each device in the device_list to use later
         device_list[device_name][1] = device_interfaces
@@ -1504,6 +1508,7 @@ for apn_name in apn_ids:
     net_service_ids[network_service_name] = net_srv_id
     #pprint.pprint(device_list)
 
+
     # Now create a network service for each GSSN (All ISNG interfaces) for the datacenters that the user specified.
     # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-All-GGSNs.
     for datacenter in profile['dc_list']:
@@ -1527,9 +1532,9 @@ for apn_name in apn_ids:
         'serviceType': 6}]}
 
         # Add service members to the network service definition for each apn on every interface for that single device
-        # This means that for each datacenter specified, we should have a list of network services for each...
-        # interface on that datacenter ISNG device. Each network service is the combination of the device interface...
-        # and the APN location
+        # This means that for each datacenter specified, we should have a list of network services for all...
+        # interfaces on that datacenter ISNG device. Each network service is the combination of the device interfaces...
+        # and the APN location.
         net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
 
         for device_interface in device_list[datacenter][1]:
@@ -1553,79 +1558,154 @@ for apn_name in apn_ids:
         net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
         # Add this network service id to our dictionary so we can use it later to assign domain members.
         net_service_ids[network_service_name] = net_srv_id
-        #pprint.pprint(net_service_ids)
-exit()
-#Lists of existing applications we intend to use. Could pull this from a file.
-app_service_list = ['GTPv0', 'GTPv1', 'GTPv2']
-app_service_ids = {}
 
-# Interate through the network service list and create services for use later in domain "Control".
-for network_service in network_service_list:
-    # We need to fetch the ids of each network service.
-    net_srv_config_data = get_service_detail(ng1_host, network_service, headers, cookies)
-    # Extract the id from the service config data
-    net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
-    # Add this network service id to a dictionay of ids.
-    network_service_ids[network_service] = net_srv_id
-    # For writing each app service configuration to the json file, first set the config_type.
-    config_type = 'get_service_detail'
-    # Iterate throught the app_service_list and create a new app service for each app in the app_service_list.
-    for app_serv in app_service_list:
-        application_service_name = 'App Service ' + app_serv + ' ' + network_service
-        app_srv_config_data = {'serviceDetail': [{'alertProfileID': 1,
-                    'exclusionListID': -1,
-                    'id': -1,
-                    'isAlarmEnabled': False,
-                    'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
-                    'serviceMembers': [{'enableAlert': False,
-                                        'interfaceNumber': -1,
-                                        'isNetworkDomain': True,
-                                        'melID': -1,
-                                        'networkDomainID': net_srv_id,
-                                        'networkDomainName': network_service,
-                                        'protocolOrGroupCode': app_serv}],
-                    'serviceName': application_service_name,
-                    'serviceType': 1}]}
-        # Write the config_data to a JSON configuration file.
-        write_config_to_json(config_type, 'Null', application_service_name, 'Null', 'Null', 'Null', 'Null', app_srv_config_data)
-        # Create the new app service.
-        create_service(ng1_host, service_type, application_service_name, headers, cookies)
-        # We need to know the id number that was assigned to this new app service.
-        app_srv_config_data = get_service_detail(ng1_host, application_service_name, headers, cookies)
-        app_srv_id = app_srv_config_data['serviceDetail'][0]['id']
-        # Add this app service id to our dictionary so we can use it later to assign domain members.
-        app_service_ids[application_service_name] = app_srv_id
+    # Now create a network service for each interface on each datacenter that the user specified.
+    # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-{gateway}.
+    # The translation of interface name to gateway name is hardcoded here.
+    # Perhaps in the future we can read a master file that has all the interface to gateway mapping
+    for datacenter in profile['dc_list']:
+        for device_interface in device_list[datacenter][1]:
+            if datacenter.startswith('Atl'):
+                if device_interface['interfaceName'] == 'ATL-NTCT-INF-01':
+                    gateway = 'ATL1-GGSN'
+                elif device_interface['interfaceName'] == 'ATL-NTCT-INF-02':
+                    gateway = 'M2M-ATL-GGSN'
+                elif device_interface['interfaceName'] == 'ATL-NTCT-INF-03':
+                    gateway = 'ATL2-GGSN'
+                network_service_name = 'ATL-NWS-' + apn_name + '-' + gateway
+            elif datacenter.startswith('Pho'):
+                if device_interface['interfaceName'] == 'PHX-NTCT-INF-01':
+                    gateway = 'PHX1-GGSN'
+                elif device_interface['interfaceName'] == 'PHX-NTCT-INF-02':
+                    gateway = 'M2M-PHX-GGSN'
+                elif device_interface['interfaceName'] == 'PHX-NTCT-INF-03':
+                    gateway = 'PHX-GGSN'
+                network_service_name = 'PHX-NWS-' + apn_name + '-' + gateway
+            elif datacenter.startswith('San'):
+                if device_interface['interfaceName'] == 'SJC-NTCT-INF-01':
+                    gateway = 'SJC1-GGSN'
+                elif device_interface['interfaceName'] == 'SJC-NTCT-INF-02':
+                    gateway = 'M2M-SJC-GGSN'
+                elif device_interface['interfaceName'] == 'SJC-NTCT-INF-03':
+                    gateway = 'SJC-GGSN'
+                network_service_name = 'SJC-NWS-' + apn_name + '-' + gateway
+            elif datacenter.startswith('Tor'):
+                if device_interface['interfaceName'] == 'TOR-NTCT-INF-01':
+                    gateway = 'TOR-VPCSI1'
+                elif device_interface['interfaceName'] == 'TOR-NTCT-INF-02':
+                    gateway = 'TOR-VPCSI2'
+                network_service_name = 'TOR-NWS-' + apn_name + '-' + gateway
+            elif datacenter.startswith('Van'):
+                if device_interface['interfaceName'] == 'VAN-NTCT-INF-01':
+                    gateway = 'VAN-VPCSI1'
+                elif device_interface['interfaceName'] == 'VAN-NTCT-INF-02':
+                    gateway = 'VAN-VPCSI2'
+                network_service_name = 'VAN-NWS-' + apn_name + '-' + gateway
 
-# Create the App Services 'Web App Group' to be used by the User Donmain
-# Create one for each network service
-for network_service in network_service_list:
-    application_service_name = 'Web App Group ' + network_service
-    # Fetch the network service id number from our list network_service_ids
-    net_srv_id = network_service_ids[network_service] = net_srv_id
-    app_srv_config_data = {'serviceDetail': [{'alertProfileID': 1,
+            # Initialize the dictionay that we will use to build up our network service definition.
+            net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
             'exclusionListID': -1,
             'id': -1,
             'isAlarmEnabled': False,
-            'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
-            'serviceMembers': [{'enableAlert': False,
-                                'interfaceNumber': -1,
-                                'isNetworkDomain': True,
-                                'isProtocolGroup': True,
-                                'melID': -1,
-                                'networkDomainID': net_srv_id,
-                                'networkDomainName': network_service,
-                                'protocolOrGroupCode': 'WEB'}],
+            'serviceName': network_service_name,
+            'serviceType': 6}]}
+
+            # Create a network service definition for each apn for each interface for each datacenter selected
+            # This means that for each datacenter specified, we should have a list of network services for each...
+            # interface on that datacenter ISNG device. Each network service is the combination of a single device...
+            # interface and the APN location.
+            net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+
+            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+            'interfaceNumber': device_interface['interfaceNumber'],
+            'ipAddress': device_list[datacenter][0],
+            'locationKeyInfo': [{'asi1xType': '',
+            'isLocationKey': True,
+            'keyAttr': apn_ids[apn_name],
+            'keyType': 4}],
+            'meAlias': device_interface['alias'],
+            'meName': device_interface['interfaceName']})
+
+            # Write the config_data to a JSON configuration file.
+            config_type = 'get_service_detail'
+            write_config_to_json(config_type, 'Null', network_service_name, 'Null', 'Null', 'Null', 'Null', net_srv_config_data)
+            # Create the new network service.
+            create_service(ng1_host, 'Null', network_service_name, headers, cookies)
+            # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
+            net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
+            net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
+            # Add this network service id to our dictionary so we can use it later to assign domain members.
+            net_service_ids[network_service_name] = net_srv_id
+
+#Lists of existing applications we intend to use. Could pull this from a file.
+app_list = ['GTPv0', 'GTPv1-Create-PDP', 'GTPv1-Update-PDP', 'GTPv1-Delete-PDP', 'GTPv2-CSR',
+           'GTPv2-UBR', 'GTPv2-MBR', 'GTPv2-DSR', 'Web', 'DNS']
+app_service_ids = {}
+
+# Now create create the application services for GTPv0, GTPv1 and GTPv2 for each interface on each datacenter entered
+for apn_name in apn_ids:
+    for app_name in app_list:
+        for datacenter in profile['dc_list']:
+            if datacenter.startswith('Atl'):
+                application_service_name = 'ATL-AS-' + app_name + '-' + apn_name
+            elif datacenter.startswith('Pho'):
+                application_service_name = 'PHX-AS-' + app_name + '-' + apn_name
+            elif datacenter.startswith('San'):
+                application_service_name = 'SJC-AS-' + app_name + '-' + apn_name
+            elif datacenter.startswith('Tor'):
+                application_service_name = 'TOR-AS-' + app_name + '-' + apn_name
+            elif datacenter.startswith('Van'):
+                application_service_name = 'VAN-AS-' + app_name + '-' + apn_name
+
+            # Initialize the dictionay that we will use to build up our application service definition.
+            app_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
+            'exclusionListID': -1,
+            'id': -1,
+            'isAlarmEnabled': False,
             'serviceName': application_service_name,
             'serviceType': 1}]}
-    # Write the config_data to a JSON configuration file.
-    write_config_to_json(config_type, 'Null', application_service_name, 'Null', 'Null', 'Null', 'Null', app_srv_config_data)
-    # Create the new app service.
-    create_service(ng1_host, service_type, application_service_name, headers, cookies)
-    # We need to know the id number that was assigned to this new app service.
-    app_srv_config_data = get_service_detail(ng1_host, application_service_name, headers, cookies)
-    app_srv_id = app_srv_config_data['serviceDetail'][0]['id']
-    # Add this app service id to our dictionary so we can use it later to assign domain members.
-    app_service_ids[application_service_name] = app_srv_id
+
+            # Add members to the service that is each interface for each datacenter
+            app_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+            # The protocol or group code for each service member is the app name limited to 10 chars
+            if app_name == 'Web':
+                protocol_or_group_code = 'WEB'
+                is_protocol_group = True
+            elif app_name == 'DNS':
+                protocol_or_group_code = 'DNS_TCP'
+                is_protocol_group = False
+            else:
+                protocol_or_group_code = app_name[:10]
+                is_protocol_group = False
+            #print('\nProtocol or group code is: ', protocol_or_group_code)
+
+            for network_service in net_service_ids:
+                # Don't include the network services containing multiple interfaces.
+                # From that list, filter out the network services that do not include the current...
+                # APN name in this loop. In other words, I only want network services for individual...
+                # interfaces for each datacenter entered by the user, and of those, only the ones that...
+                # contain the current APN name in this loop
+                if 'All' not in network_service and apn_name in network_service and network_service.startswith(application_service_name[:2]):
+                    net_srv_id = net_service_ids[network_service]
+                    app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                                        'interfaceNumber': -1,
+                                        'isNetworkDomain': True,
+                                        'isProtocolGroup': is_protocol_group,
+                                        'melID': -1,
+                                        'networkDomainID': net_srv_id,
+                                        'networkDomainName': network_service,
+                                        'protocolOrGroupCode': protocol_or_group_code})
+
+            # Write the config_data to a JSON configuration file.
+            config_type = 'get_service_detail'
+            write_config_to_json(config_type, 'Null', application_service_name, 'Null', 'Null', 'Null', 'Null', app_srv_config_data)
+            # Create the new application service.
+            create_service(ng1_host, 'Null', application_service_name, headers, cookies)
+            # We need to know the id number that was assigned to this new app service, so we get_service_detail on it.
+            app_srv_config_data = get_service_detail(ng1_host, application_service_name, headers, cookies)
+            app_srv_id = app_srv_config_data['serviceDetail'][0]['id']
+            # Add this application service id to our dictionary so we can use it later to assign domain members.
+            app_service_ids[application_service_name] = app_srv_id
 
 exit()
 
@@ -1780,7 +1860,7 @@ for network_service in network_service_list:
 # pprint.pprint(config_data)
 
 # Get info on a specific application
-#config_data = get_app_detail(ng1_host, app_name, headers, cookies)
+#config_data = get_app_detail(ng1_host, headers, cookies, app_name)
 #if config_data != False:
     #pprint.pprint(config_data)
 
