@@ -15,6 +15,23 @@ import logging
 # disable the warnings for ignoring Self Signed Certificates
 requests.packages.urllib3.disable_warnings()
 
+def translate_dc_name_to_acronym(datacenter_name):
+    # Translate the datacenter name into the 3 letter acronym that we need to match up to the app service name.
+    if datacenter_name.startswith('Atl'):
+        dc_acronym = 'ATL'
+    elif datacenter_name.startswith('Pho'):
+        dc_acronym = 'PHX'
+    elif datacenter_name.startswith('San'):
+        dc_acronym = 'SJC'
+    elif datacenter_name.startswith('Tor'):
+        dc_acronym = 'TOR'
+    elif datacenter_name.startswith('Van'):
+        dc_acronym = 'VAN'
+    else:
+        print('[Error] Unable to match datacenter name to its 3 letter acronym')
+        return False
+    return dc_acronym
+
 def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
     # This function is an entry menu for entering new customer information.
     # It takes in a list of valid APNs and returns the user's entries as a profile dictionary.
@@ -702,6 +719,36 @@ def set_apns(ng1_host, headers, cookies):
 
         return False
 
+def build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids):
+    # Create one layer of a domain hierarchy
+    parent_config_data = {"domainDetail": [{
+                                          "domainName": domain_name,
+                                          "id": "-1",
+                                          "parentID": parent_domain_id}]}
+    # If domain members were passed in, add them as members to this domain
+    if domain_member_ids != None:
+        # Create an empty list of domain members that we can append to
+        parent_config_data['domainDetail'][0]['domainMembers'] = []
+        # Now iterate through the list of domain members passed in and add them as domain memembers
+        for domain_member in domain_member_ids:
+            parent_config_data['domainDetail'][0]['domainMembers'].append({'id': domain_member_ids[domain_member],
+                                                  'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
+                                                  'serviceName': domain_member,
+                                                  'serviceType': 1})
+
+    # Write the config_data to a JSON configuration file.
+
+    #write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', parent_config_data)
+    # Create the parent domain.
+    if create_domain(ng1_host, domain_name, headers, cookies, parent_config_data) == True:
+        # Fetch the id of the domain we just created so that we can use it to add child domains.
+        parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
+        parent_domain_id = parent_config_data['domainDetail'][0]['id']
+    else:
+        print(f'Unable to create domain: {domain_name} Exiting...')
+        exit()
+
+    return parent_domain_id
 
 def get_domains(ng1_host, headers, cookies):
     service_uri = "/ng1api/ncm/domains/"
@@ -740,36 +787,28 @@ def get_domain_detail(ng1_host, domain_name, headers, cookies):
         return get.json()
 
     else:
-        print('[FAIL] get_domain_detail for', domain_name, 'Failed')
-        print('URL:', url)
-        print('Response Code:', get.status_code)
-        print('Response Body:', get.text)
+        if 'Not found domain' in get.text: # Don't print fail if the domain does not yet exist
+            print(f'[INFO] Domain {domain_name} does not yet exist')
+        else:
+            print('[FAIL] get_domain_detail for', domain_name, 'Failed')
+            print('URL:', url)
+            print('Response Code:', get.status_code)
+            print('Response Body:', get.text)
 
         return False
 
-def create_domain(ng1_host, domain_name, headers, cookies):
-    # Create a new dashboard domain by reading in a file that contains all the attributes
-    # Set the read_config_from_json parameters to "Null" that we don't need
-    config_type = 'create_domain'
-    service_type = 'Null'
-    app_name = 'Null'
-    device_name = 'Null'
-    interface_id = 'Null'
-    location_name = 'Null'
+def create_domain(ng1_host, domain_name, headers, cookies, parent_config_data):
+    # Create a new dashboard domain using parent_config_data that contain all the attributes.
     service_uri = "/ng1api/ncm/domains/"
-
-    # Read in the json file to get all the service attributes
-    domain_data, config_filename = read_config_from_json(config_type, service_type, domain_name, app_name, device_name, interface_id, location_name)
     url = "https://" + ng1_host + service_uri
-
-    # use json.dumps to provide a serialized json object (a string actually)
-    # this json_string will become our new configuration for this domain_name
-    json_string = json.dumps(domain_data)
+    # use json.dumps to provide a serialized json object (a string actually).
+    # This json_string will become our new configuration for this domain_name.
+    json_string = json.dumps(parent_config_data)
     # print('New domain data =')
     # print(json_string)
 
     # perform the HTTPS API Post call with the serialized json object service_data
-    # this will create the service configuration in nG1 for this config_filename (the new service_name)
+    # this will create the domain configuration in nG1 for this domain_name)
     post = requests.post(url, headers=headers, data=json_string, verify=False, cookies=cookies)
 
     if post.status_code == 200:
@@ -1637,12 +1676,12 @@ for apn_name in apn_ids:
             # Add this network service id to our dictionary so we can use it later to assign domain members.
             net_service_ids[network_service_name] = net_srv_id
 
-#Lists of existing applications we intend to use. Could pull this from a file.
+# This is a list of existing applications we intend to use. Could pull this from a file.
 app_list = ['GTPv0', 'GTPv1-Create-PDP', 'GTPv1-Update-PDP', 'GTPv1-Delete-PDP', 'GTPv2-CSR',
            'GTPv2-UBR', 'GTPv2-MBR', 'GTPv2-DSR', 'Web', 'DNS']
 app_service_ids = {}
 
-# Now create create the application services for GTPv0, GTPv1 and GTPv2 for each interface on each datacenter entered
+# Now create create the application services for GTPv0, GTPv1 and GTPv2 for each interface on each datacenter entered.
 for apn_name in apn_ids:
     for app_name in app_list:
         for datacenter in profile['dc_list']:
@@ -1665,9 +1704,9 @@ for apn_name in apn_ids:
             'serviceName': application_service_name,
             'serviceType': 1}]}
 
-            # Add members to the service that is each interface for each datacenter
+            # Add members to the service that is each interface for each datacenter.
             app_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
-            # The protocol or group code for each service member is the app name limited to 10 chars
+            # The protocol or group code for each service member is the app name limited to 10 chars.
             if app_name == 'Web':
                 protocol_or_group_code = 'WEB'
                 is_protocol_group = True
@@ -1680,11 +1719,10 @@ for apn_name in apn_ids:
             #print('\nProtocol or group code is: ', protocol_or_group_code)
 
             for network_service in net_service_ids:
-                # Don't include the network services containing multiple interfaces.
-                # From that list, filter out the network services that do not include the current...
-                # APN name in this loop. In other words, I only want network services for individual...
-                # interfaces for each datacenter entered by the user, and of those, only the ones that...
-                # contain the current APN name in this loop
+                # Filter down the list of network_service_ids to just the interfaces for the current datacenter...
+                # loop and just those interfaces for the current APN loop. The goal is to create an app service...
+                # that is specific to an APN + datacenter combination and add the related interface network...
+                # services as members of this app service.
                 if 'All' not in network_service and apn_name in network_service and network_service.startswith(application_service_name[:2]):
                     net_srv_id = net_service_ids[network_service]
                     app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
@@ -1707,129 +1745,146 @@ for apn_name in apn_ids:
             # Add this application service id to our dictionary so we can use it later to assign domain members.
             app_service_ids[application_service_name] = app_srv_id
 
-exit()
-
-# Create an empty domain under the root "Enterprise".
+# Fetch the existing domain tree data so that we know what domains already exist.
+domain_tree_data = get_domains(ng1_host, headers, cookies)
+#print(f'Domain tree is: {domain_tree_data}')
 domain_name = 'Cisco IOT'
-parent_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": 1}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', parent_config_data)
-# Create the parent domain.
-create_domain(ng1_host, domain_name, headers, cookies)
-parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-# Fetch the id of the domain we just created so that we can use it to add children domains.
-parent_domain_id = parent_config_data['domainDetail'][0]['id']
-# Create an empty child domain under "Cisco IOT".
+for domain in domain_tree_data['domain']:
+    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
+        skip = True
+        print(f'[INFO] Domain: {domain_name} already exists, skipping')
+        # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
+        parent_domain_id = domain['id']
+        break
+    else:
+        skip = False
+if skip == False: # The domain does not yet exist, create it
+    # Create the domain
+    # Initialize an empty list of domain member ids for use when we add domains that have members.
+    domain_member_ids = {}
+    parent_domain_id = 1 # This is the parentID of the default 'Enterprise' domain at the top.
+    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
+
 domain_name = 'APNs'
-child_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": parent_domain_id}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-# Create a child domain.
-create_domain(ng1_host, domain_name, headers, cookies)
-parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-# Fetch the id of the domain we just created so that we can use it to add childern domains.
-parent_domain_id = parent_config_data['domainDetail'][0]['id']
+for domain in domain_tree_data['domain']:
+    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
+        skip = True
+        print(f'[INFO] Domain: {domain_name} already exists, skipping')
+        # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
+        parent_domain_id = domain['id']
+        break
+    else:
+        skip = False
+if skip == False: # The domain does not yet exist, create it
+    # Create the domain.
+    # Initialize an empty list of domain member ids for use when we add domains that have members.
+    domain_member_ids = {}
+    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
 
-# Create an empty child domain under "APNs".
-domain_name = 'Connected Cars'
-child_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": parent_domain_id}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-# Create a child domain.
-create_domain(ng1_host, domain_name, headers, cookies)
-parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-# Fetch the id of the domain we just created so that we can use it to add childern domains.
-parent_domain_id = parent_config_data['domainDetail'][0]['id']
 
-# Create a child domain that has the name of the user entered vehicle manufacturer.
-domain_name = car_co
-child_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": parent_domain_id}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-# Create a child domain
-create_domain(ng1_host, domain_name, headers, cookies)
-parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-# Fetch the id of the domain we just created so that we can use it to add childern domains.
-parent_domain_id = parent_config_data['domainDetail'][0]['id']
+domain_name = profile['customer_type'] + ' APNs' # This will be either 'Connected Car' or 'IOT'.
+for domain in domain_tree_data['domain']:
+    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
+        skip = True
+        print(f'[INFO] Domain: {domain_name} already exists, skipping')
+        # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
+        parent_domain_id = domain['id']
+        break
+    else:
+        skip = False
+if skip == False: # The domain does not yet exist, create it
+    # # Create the domain.
+    # Initialize an empty list of domain member ids for use when we add domains that have members.
+    domain_member_ids = {}
+    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
 
-# Create a child domain under the vehicle manufacturer domain.
+domain_name = profile['cust_name'] # Set the domain name to be the customer name as entered in the menu
+for domain in domain_tree_data['domain']:
+    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
+        skip = True
+        print(f'[ERROR] Domain: {domain_name} already exists,')
+        print('Customer name must be unique. Exiting...')
+        exit()
+    else:
+        skip = False
+if skip == False: # The domain does not yet exist, create it
+    # # Create the domain.
+    # The members for this customer domain will be all of the network interfaces for each APN.
+    domain_member_ids = {} # Reset the list of domain members
+    for network_service_name in net_service_ids:
+        for apn_name in apn_ids:
+            if 'All-NWS-' + apn_name in network_service_name:
+                domain_member_ids[network_service_name] = net_service_ids[network_service_name]
+    # Create the customer domain using the customer name entered in the menu.
+    # Make it a child domain of either IOT APNs or Connected Car APNs.
+    cust_parent_domain_id  = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
+
+# Create a child domain 'Control' under the customer name domain.
+domain_member_ids = {} # Reset the list of domain members
 domain_name = 'Control'
-child_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": parent_domain_id}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-# Create a child domain
-create_domain(ng1_host, domain_name, headers, cookies)
-parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-# Fetch the id of the domain we just created so that we can use it to add childern domains.
-control_domain_id = parent_config_data['domainDetail'][0]['id']
+control_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, cust_parent_domain_id, domain_member_ids)
 
-# Create a child domain under the vehicle manufacturer domain.
-domain_name = 'User'
-child_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": parent_domain_id}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-# Create a child domain
-create_domain(ng1_host, domain_name, headers, cookies)
+# Create a child domain under 'Control' for each datacenter name that the user entered.
+for datacenter in profile['dc_list']:
+    domain_name = datacenter
+    domain_member_ids = {} # Reset the list of domain members
+    # Build the domain for this datacenter name that will contain the GTPvx domains. Place it as a child of 'Control'.
+    dc_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, control_parent_domain_id, domain_member_ids)
+    dc_acronym = translate_dc_name_to_acronym(datacenter)
 
-# Create a child domain under the vehicle manufacturer domain.
-domain_name = 'DNS'
-child_config_data = {"domainDetail": [{
-                                      "domainName": domain_name,
-                                      "id": "-1",
-                                      "parentID": parent_domain_id}]}
-# Write the config_data to a JSON configuration file.
-write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-# Create a child domain.
-create_domain(ng1_host, domain_name, headers, cookies)
+    #Add the GTPvx domains including the associated application services.
+    # These domains will have members, so we will build up a list to pass to build_domain_tree.
+    domain_member_ids = {} # Reset the list of domain members
+    # Look for any application service name that includes both the GTP app name as well as the datacente acronym.
+    for application_service_name in app_service_ids:
+        if 'GTPv0' in application_service_name and dc_acronym in application_service_name:
+            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
-# Create three domains under the parent domain "Control". These domains will have members.
-# Interate through the list of network services as there will be a child domain for each one.
-for network_service in network_service_list:
-    domain_name = network_service
-    domain_member_ids = []
-    # Iterate through the list of app services as there will be a domainMember for each one.
-    for app_serv in app_service_list:
-        application_service_name = 'App Service ' + app_serv + ' ' + network_service
-        # Create a list of app service ids as we will need to include them in the domainMember definitions.
-        domain_member_ids.append(app_service_ids[application_service_name])
-    # Specify the domain configuration data that includes domainMembers.
-    child_config_data = {'domainDetail': [{'domainMembers': [{'id': domain_member_ids[0],
-                                          'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
-                                          'serviceName': 'App Service ' + app_service_list[0] + ' ' + network_service,
-                                          'serviceType': 1},
-                                         {'id': domain_member_ids[1],
-                                          'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
-                                          'serviceName': 'App Service ' + app_service_list[1] + ' ' + network_service,
-                                          'serviceType': 1},
-                                         {'id': domain_member_ids[2],
-                                          'serviceDefMonitorType': 'ADM_MONITOR_ENT_ADM',
-                                          'serviceName': 'App Service ' + app_service_list[2] + ' ' + network_service,
-                                          'serviceType': 1}],
-                       'domainName': domain_name,
-                       'id': -1,
-                       'parentID': control_domain_id}]}
-    # Write the config_data to a JSON configuration file.
-    write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', child_config_data)
-    # Create a child domain.
-    create_domain(ng1_host, domain_name, headers, cookies)
+    domain_name = 'GTPv0' # Hardcoding the domain name based on the same list of apps for all customers.
+    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
+
+    domain_member_ids = {} # Reset the list of members.
+    # Look for any application service name that includes both the GTP app name as well as the datacenter acronym.
+    for application_service_name in app_service_ids:
+        if 'GTPv1' in application_service_name and dc_acronym in application_service_name:
+            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+
+    domain_name = 'GTPv1' # Hardcoding the domain name based on the same list of apps for all customers.
+    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
+
+    domain_member_ids = {} # Reset the list of members.
+    # Look for any application service name that includes both the GTP app name as well as the datacenter acronym.
+    for application_service_name in app_service_ids:
+        if 'GTPv2' in application_service_name and dc_acronym in application_service_name:
+            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+
+    domain_name = 'GTPv2' # Hardcoding the domain name based on the same list of apps for all customers.
+    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
+
+# Add the User domain as a child to the customer domain.
+domain_member_ids = {} # Reset the list of members
+for datacenter in profile['dc_list']:
+    # Include the web app service memembers associated to this APN and datacenter.
+    dc_acronym = translate_dc_name_to_acronym(datacenter)
+    # Look for any application service name that includes both the Web app name as well as the datacenter acronym.
+    for application_service_name in app_service_ids:
+        if 'Web' in application_service_name and dc_acronym in application_service_name:
+            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+
+domain_name = 'User' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
+user_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, cust_parent_domain_id, domain_member_ids)
+
+# Add the DNS domain including the DNS app service memembers associated to this APN
+domain_member_ids = {} # Reset the list of members
+for datacenter in profile['dc_list']:
+    dc_acronym = translate_dc_name_to_acronym(datacenter)
+    # Look for any application service name that includes both the DNS app name as well as the datacenter acronym.
+    for application_service_name in app_service_ids:
+        if 'DNS' in application_service_name and dc_acronym in application_service_name:
+            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+
+    domain_name = 'DNS' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
+    dns_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, cust_parent_domain_id, domain_member_ids)
 
 #FOR TESTING: Delete everything
 #domain_name = 'Cisco IOT'
