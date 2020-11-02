@@ -7,6 +7,7 @@ import os
 import csv
 import time
 import string
+import re
 from collections import defaultdict
 from datetime import date, datetime
 from cryptography.fernet import Fernet
@@ -14,6 +15,59 @@ import logging
 
 # disable the warnings for ignoring Self Signed Certificates
 requests.packages.urllib3.disable_warnings()
+
+def validate_apns_to_gateways(ng1_host, headers, cookies, profile, device_list):
+    # This function takes in the user entered profile and the device_list.
+    # It will use the datacenters entered by the user to filter the device list.
+    # Then it will get all the interfaces (gateways) for each device belonging to those datacenters.
+    # Then it will check each interface to make sure that the user entered APNs have been associated to them.
+    for datacenter in profile['dc_list']:
+        for device_name in device_list:
+            if datacenter[:2].upper() == device_name[:2].upper():
+                interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
+                for interface in interfaces_data['interfaceConfigurations']:
+                    interface_number = str(interface['interfaceNumber'])
+                    apn_data = get_apns_on_an_interface(ng1_host, headers, cookies, device_name, interface_number)
+                    for apn_name in profile['apn_list']:
+                        if apn_name not in apn_data['apnAssociations']:
+                            print(f'APN Name: {apn_name} is not yet associated to Device: {device_name} Interface: {interface_number}')
+                            print('Please associate the APN to the interface and run this program again. Exiting...')
+                            exit()
+
+    return True
+
+
+
+def check_splcharacter(test, no_comma):
+    # Function checks if the input string(test) contains any special character or not.
+    # Some entries allow for a comma, but some such as customer name do not.
+    # For enteries that do not allow commas, pass in no_comma set to True, otherwise set to False.
+    if no_comma == True:
+        for char in test:
+            if char in "[@,!#$%^&*()<>?/\|}{~:]'":
+                print("Entry cannot contain special characters: [@,!#$%^&*()<>?/\|}{~:]")
+                return True
+    else:
+        for char in test:
+            if char in "[@!#$%^&*()<>?/\|}{~:]'":
+                print("Entry cannot contain special characters: [@!#$%^&*()<>?/\|}{~:]")
+                return True
+
+    return False
+
+def domain_exists(domain_name, domain_tree_data):
+    for domain in domain_tree_data['domain']:
+        if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
+            skip = True
+            print(f'[INFO] Domain: {domain_name} already exists, skipping')
+            # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
+            parent_domain_id = domain['id']
+            return skip, parent_domain_id
+        else:
+            skip = False
+
+    parent_domain_id = ''
+    return skip, parent_domain_id
 
 def translate_dc_name_to_acronym(datacenter_name):
     # Translate the datacenter name into the 3 letter acronym that we need to match up to the app service name.
@@ -32,10 +86,89 @@ def translate_dc_name_to_acronym(datacenter_name):
         return False
     return dc_acronym
 
-def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
+def create_gateway_net_services(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym, net_service_ids):
+    # Now create a network service for each interface (gateway) on each datacenter that the user specified.
+    # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-{gateway}.
+    # The translation of interface name to gateway name is hardcoded here.
+    # Perhaps in the future we can read a master file that has all the interface to gateway mapping
+    for device in device_list:
+        for device_interface in device_list[device][1]:
+            if device.startswith(dc_acronym):
+                gateway = device_interface['interfaceName']
+                network_service_name = dc_acronym + '-NWS-' + apn_name + '-' + gateway
+
+                # Initialize the dictionay that we will use to build up our network service definition.
+                net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
+                'exclusionListID': -1,
+                'id': -1,
+                'isAlarmEnabled': False,
+                'serviceName': network_service_name,
+                'serviceType': 6}]}
+
+                # Create a network service definition for each apn for each interface for each datacenter selected
+                # This means that for each datacenter specified, we should have a list of network services for each...
+                # interface on that datacenter ISNG device. Each network service is the combination of a single device...
+                # interface and the APN location.
+                net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+
+                net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                'interfaceNumber': device_interface['interfaceNumber'],
+                'ipAddress': device_list[device][0],
+                'locationKeyInfo': [{'asi1xType': '',
+                'isLocationKey': True,
+                'keyAttr': apn_ids[apn_name],
+                'keyType': 4}],
+                'meAlias': device_interface['alias'],
+                'meName': device_interface['interfaceName']})
+
+                # Create the new network service.
+                create_service(ng1_host, headers, cookies, 'Null', network_service_name, net_srv_config_data, False)
+                # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
+                net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
+                net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
+                # Add this network service id to our dictionary so we can use it later to assign domain members.
+                net_service_ids[network_service_name] = net_srv_id
+
+    return net_service_ids
+
+
+def create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym):
+    # Initialize the dictionay that we will use to build up our network service definition.
+    net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
+    'exclusionListID': -1,
+    'id': -1,
+    'isAlarmEnabled': False,
+    'serviceName': network_service_name,
+    'serviceType': 6}]}
+    # Initialize an empty service members list to put all the interfaces in
+    net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+    for device in device_list:
+        # Find all the devices that exist in this datacenter
+        if device.startswith(dc_acronym):
+            for device_interface in device_list[device][1]:
+                net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                'interfaceNumber': device_interface['interfaceNumber'],
+                'ipAddress': device_list[device][0],
+                'locationKeyInfo': [{'asi1xType': '',
+                'isLocationKey': True,
+                'keyAttr': apn_ids[apn_name],
+                'keyType': 4}],
+                'meAlias': device_interface['alias'],
+                'meName': device_interface['interfaceName']})
+    # Create the new network service.
+    create_service(ng1_host, headers, cookies, 'Null', network_service_name, net_srv_config_data, False)
+    # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
+    net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
+    net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
+    return net_srv_id
+
+
+def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, customer_list):
     # This function is an entry menu for entering new customer information.
-    # It takes in a list of valid APNs and returns the user's entries as a profile dictionary.
+    # It takes in a customer name, a list of APNs, the customer type and a list of valid datacenters.
+    # It returns the user's entries as a profile dictionary.
     # Return False if the user messes up and wants to start over
+
     # Create an empty dictionary that will hold our customer menu entries.
     profile = {}
     # Create an empty list that will contain one or more APN entries.
@@ -44,12 +177,24 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
     user_entry = ''
     print('\nThis program takes input for customer attributes and creates a full configuration in nG1 to match')
     print("To cancel any changes, please type 'exit'")
-    # Take the users input and verify that all APNs entered are valid, meaning they already exist.
+
+    print("\nCustomers already input are: ")
+    print(sorted(customer_list), '\n')
 
     # User enters the customer name.
-    user_entry = input("Please enter the Customer Name: ")
+    while True:
+        user_entry = input("Please enter the new Customer Name: ")
+        if user_entry in customer_list:
+            print(f"Customer: {user_entry} already exists")
+            print("Please enter a customer that is not already in the list")
+            continue
+        elif check_splcharacter(user_entry, True) == True:
+            continue
+        else:
+            break
+
     if user_entry == '':
-        profile['cust_name'] = 'Ring'
+        profile['cust_name'] = 'Giles'
     elif user_entry.lower() == 'exit':
         exit()
     else:
@@ -62,10 +207,16 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
     apn_entry_list = []
     # User enters one or more APNs.
     # User enters the APN(s)
-    user_entry = input("Please enter one or more APNs from the list separated by comma: ")
+    while True:
+        user_entry = input("Please enter one or more APNs from the list separated by comma: ")
+        if check_splcharacter(user_entry, False) == True:
+            continue
+        else:
+            break
     if user_entry == '':
         # For testing, allow the user to just hit enter
-        apn_entry_list.append('Ring')
+        apn_entry_list.append('Onstar01')
+        apn_entry_list.append('Onstar02')
     elif user_entry.lower() == 'exit':
         exit()
     else:
@@ -79,13 +230,12 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
 
     for apn_entry in apn_entry_list:
         if apn_entry not in apn_list:
-            print(f"APN: {user_entry} does not yet exist")
-            print(f"Please create APN: {user_entry} first and then run this program again")
+            print(f"APN: {apn_entry} does not yet exist")
+            print(f"Please create APN: {apn_entry} first and then run this program again")
             print("No nG1 modifications will be made. Exiting...")
             exit()
 
     profile['apn_list'] = apn_entry_list
-
 
     print('Please select the customer type:')
     print('[1] IOT')
@@ -96,7 +246,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
             exit()
         elif user_entry == '':
             # For testing, allow the user to just hit enter
-            profile['customer_type'] = 'IOT'
+            profile['customer_type'] = 'Connected Car'
             break
         elif user_entry == '1':
             profile['customer_type'] = 'IOT'
@@ -112,8 +262,13 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
     print(sorted(datacenter_list), '\n')
     # Initialize an empty list to hold user entered datacenters
     dc_entry_list = []
-    # User enters one or more Datacenters.
-    user_entry = input("Please enter one or more Datacenters from the list separated by comma: ")
+    while True:
+        # User enters one or more Datacenters.
+        user_entry = input("Please enter one or more Datacenters from the list separated by comma: ")
+        if check_splcharacter(user_entry, False) == True:
+            continue
+        else:
+            break
     if user_entry == '':
         # For testing, allow the user to just hit enter
         dc_entry_list.append('Atlanta')
@@ -130,7 +285,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list):
 
     for dc_entry in dc_entry_list:
         if dc_entry not in datacenter_list:
-            print(f"Datacenter: {dc_entry} does not yet exist")
+            print(f"[Error] Datacenter: {dc_entry} does not yet exist")
             print(f"Please create Datacenter: {dc_entry} first and then run this program again")
             print("No nG1 modifications will be made. Exiting...")
             exit()
@@ -373,7 +528,7 @@ def read_config_from_json(config_type, service_type, service_name, app_name, dev
         config_filename = app_name + '.json'
     elif config_type == 'create_app':
         config_filename = app_name  + '.json'
-    elif config_type == 'get_datacenters':
+    elif config_type == 'get_datacenters' or config_type == 'get_customers':
         config_filename = service_name  + '.json'
     elif config_type == 'set_apns':
         config_filename = 'apn-list'  + '.json'
@@ -682,6 +837,28 @@ def get_apn_detail(ng1_host, headers, cookies, apn_name):
 
         return False
 
+def get_apns_on_an_interface(ng1_host, headers, cookies, device_name, interface_number):
+    uri = "/ng1api/ncm/devices/"
+    url = "https://" + ng1_host + uri + device_name + "/interfaces/" + interface_number + "/associateapns"
+
+    # perform the HTTPS API call to get the APN detail information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print(f"[INFO] get_apns_on_an_interface for device: {device_name} interface number: {interface_number} Successful")
+
+        # return the json object that contains the APN detail information
+        return get.json()
+
+    else:
+        print(f"[FAIL] get_apns_on_an_interface for device: {device_name} interface number: {interface_number} Failed")
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
 def set_apns(ng1_host, headers, cookies):
     # Add a list of APN groups to nG1 based on an existing json file definition
     # Set the read_config_from_json parameters to "Null" that we don't need
@@ -736,14 +913,19 @@ def build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id,
                                                   'serviceName': domain_member,
                                                   'serviceType': 1})
 
-    # Write the config_data to a JSON configuration file.
-
+    # Optionally Write the config_data to a JSON configuration file.
     #write_config_to_json(config_type, 'Null', domain_name, 'Null', 'Null', 'Null', 'Null', parent_config_data)
     # Create the parent domain.
     if create_domain(ng1_host, domain_name, headers, cookies, parent_config_data) == True:
         # Fetch the id of the domain we just created so that we can use it to add child domains.
-        parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-        parent_domain_id = parent_config_data['domainDetail'][0]['id']
+        #parent_config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
+        domain_tree_data = get_domains(ng1_host, headers, cookies)
+        for domain in domain_tree_data['domain']:
+            # Skip the Enterprise domain as it has no parent id number.
+            if domain['serviceName'] != 'Enterprise':
+                if domain['serviceName'] == domain_name and str(parent_domain_id) in str(domain['parent']):
+                    #print('I found my own domain id')
+                    parent_domain_id = domain['id']
     else:
         print(f'Unable to create domain: {domain_name} Exiting...')
         exit()
@@ -971,23 +1153,23 @@ def update_service(ng1_host, service_name, service_type, me_name, protocol_or_gr
 
         return False
 
-def create_service(ng1_host, service_type, service_name, headers, cookies):
-    # Create a new service by reading in a file that contains all the attributes
-    # Set the read_config_from_json parameters to "Null" that we don't need
+def create_service(ng1_host, headers, cookies, service_type, service_name, config_data, save):
+    # Create a new service using the config_data attributes passed into the function.
+    # Optionally write a copy of the config to a json file
+
+    # Set the config_type to create_service in case we are saving this to a json file
     config_type = 'create_service'
-    app_name = 'Null'
-    device_name = 'Null'
-    interface_id = 'Null'
-    location_name = 'Null'
+
     service_uri = "/ng1api/ncm/services/"
 
-    # Read in the json file to get all the service attributes
-    service_data, config_filename = read_config_from_json(config_type, service_type, service_name, app_name, device_name, interface_id, location_name)
     url = "https://" + ng1_host + service_uri
 
+    # if the save option is True, then save a copy of this configuration to a json file
+    if save == True:
+        write_config_to_json(config_type, 'Null', service_name, 'Null', 'Null', 'Null', 'Null', config_data)
     # use json.dumps to provide a serialized json object (a string actually)
     # this json_string will become our new configuration for this service_name
-    json_string = json.dumps(service_data)
+    json_string = json.dumps(config_data)
     # print('New service data =')
     # print(json_string)
 
@@ -1269,11 +1451,15 @@ def get_devices_interfaces_vlans_sorted(ng1_host, device_name, headers, cookies)
 now = datetime.now()
 date_time = now.strftime("%Y_%m_%d_%H%M%S")
 
-# Create logging function_
-logging.basicConfig(filename="ng1sync.log", format='%(asctime)s %(message)s', filemode='a+')
-# Creating an object
+# Create the logging function.
+# Use this option to log to stdout and stderr using systemd. You must also import os.
+#logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
+# Use this option to log to a file in the same directory as the .py python program is running
+logging.basicConfig(filename="ng1_add_cisco_iot_customer.log", format='%(asctime)s %(message)s', filemode='a+')
+# Creating a logger object.
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Set the logging level to the lowest setting so that all logging messages get logged.
+logger.setLevel(logging.INFO) # Allowable options include INFO, WARNING, ERROR, and CRITICAL.
 logger.info(f"*** Start of logs {date_time} ***")
 
 cred_filename = 'CredFile.ini'
@@ -1298,136 +1484,90 @@ with open(cred_filename, 'r') as cred_in:
     ng1destination = lines[5].partition('=')[2].rstrip("\n")
     ng1destPort = lines[6].partition('=')[2].rstrip("\n")
 
-
-# This one is for TTEC-WCCE Global Manager
-# ng1_host = "den01mgmtngn01.mgmt.webexcce.com"
-
-# This one is for San Jose lab nG1
+# This ng1 host IP address is for San Jose lab nG1.
 # ng1_host = "10.8.8.3"
-# This one is for the F5 Lab
+# This ng1 host IP address is for the F5 lab nG1.
 # ng1_host = "54.185.154.36"
 
-# You can use your username and password (plain text) in the authorization header (basic authentication)
-# In this case cookies must be set to 'Null'
-# If you are using the authentication Token, then credentials = 'Null'
-# credentials = 'jgiles', 'netscout1'
-# cookies = 'Null'
+# You can use your username and password (plain text) in the authorization header (basic authentication).
+# In this case cookies must be set to 'Null'.
+# If you are using the authentication Token, then credentials = 'Null'.
+# credentials = 'jgiles', 'netscout1'.
+# cookies = 'Null'.
 
-# You can use an authentication token named NSSESSIONID obtained from the User Management module in nGeniusONE (open the user and click Generate New Key)
-# If we are using the token rather than credentials, we will set credentials to 'Null'
+# You can use an authentication token named NSSESSIONID obtained from the User Management module in nGeniusONE (open the user and click Generate New Key).
+# If we are using the token rather than credentials, we will set credentials to 'Null'.
 if use_token == True:
     credentials = 'Null'
 
     cookies = {
-        'NSSESSIONID': ng1token_pl,
+        'NSSESSIONID': ng1token_pl, # In this case we will use the token read from the cred_filename file.
         }
-        # This user token is for jgiles user on the San Jose Lab nG1
+        # This user token is for jgiles user on the San Jose Lab nG1.
         #cookies = {
         #    'NSSESSIONID': 'cqDYQ7FFMtuonYyFHmBztqVtSIcM4S+jzV6iOyNwBwD/vCu88+gYTjuBvFDGUzPcwcNnhRv8GMNR5PSSYJb1JhQTpQi8VYdsb0Kw7ow1J5c=',
         #}
-
-        # This user token is for Chris Weisinger on the TTEC-WCCE global manager
-        # cookies = {
-        #     'NSSESSIONID': 'vNiSgerZ7HTlrVLE2XtneVEUkd9CtVseJ13VSBdAg67GSRMLgxdS/hpzbudVXEsx8aDfahSL/HAGhMi5X0/76SM9N56sC/sxNBE9+7RyG5x6PgZIJD6ypPSB1YPv0L5Y',
-        # }
-# Otherwise set the credentials to username:password and use that instead of an API token
+# Otherwise set the credentials to username:password and use that instead of an API token.
 else:
     cookies = 'Null'
     credentials = ng1username + ':' + ng1password_pl
 
-#ng1_host = ng1destination + ':' + ng1destPort
+# set ng1_host to what was read out of the credentials .ini file.
+# ng1_host = ng1destination + ':' + ng1destPort.
 ng1_host = ng1destination
-# Supply the name of the service to use on get_service_detail, update_service, delete_service or create_service
-#service_name = 'app_service_gilestest'
 
-# Supply the name of the dashboard domain to use on get_domain_detail, update_domain, delete_domain or create_domain
-#domain_name = 'Cisco IOT'
-
-# Supply the type of service to get from get_services (application, network or all).
-#service_type = 'get_domain_detail'
-
-# Supply the name of the application to use on get_app_detail, update_app, delete_app or create_app
-#app_name = 'MyHTTPSApp'
-# app_name = '10-8-8-APP'
-
-# Supply the device name for get_device, update_device, get_device_interfaces, get_device_interface, get_device_interface_locations, get_device_interface_location
-#device_name = 'isng4795'
-# device_name = "usden01mgmtnif01"
-
-# Supply the interface number for get_device_interface or get_device_interface_location, get_device_interface_locations
-#interface_id = "3"
-
-# Supply the attribute and attribute_value that you want to pass into one of the update functions
-#attribute = 'responseTime'
-#attribute_value = 'Disabled'
-
-# Supply the name of the location for get_device_interface_location
-#location_name = "Boston Division"
-
-# supply the the me_name and protocol_or_group_code for update_service
-#me_name = 'isng4795:if3'
-#protocol_or_group_code = 'HTTP'
-
-# Supply the type of config request you are making
-# get_device, get_devices, get_services, get_service_detail, get_device_interface
-# get_device_interfaces, get_device_interface_location, get_device_interface_locations
-# config_type = "get_service_detail"
-#config_type = 'get_domain_detail'
-
-# specify the headers to use in the API call
+# specify the headers to use in the API calls.
 headers = {
     'Cache-Control': "no-cache",
     'Accept': "application/json",
     'Content-Type': "application/json"
 }
 
-# To use username and password, pass in your credentials and set cookies = 'Null'
-# To use a token, pass in your cookies and set credentials = 'Null'
+# To use username and password, pass in your credentials and set cookies = 'Null'.
+# To use a token, pass in your cookies and set credentials = 'Null'.
 # print ('cookies = ', cookies, ' and credentials = ', credentials)
 #
 cookies = open_session(ng1_host, headers, cookies, credentials)
 
-# Put a modification to a specific device
-# update_device(ng1_host, device_name, headers, cookies)
-
-# Get info on all devices, returned as a python object
-# devices_data = get_devices(ng1_host, headers, cookies)
-# pprint.pprint(devices_data)
-
-# Get info on a specific device, returned as a python object
-# device_data = get_device(ng1_host, device_name, headers, cookies)
-# pprint.pprint(device_data)
-
-# Get info on all the interface on a specific Device
-# interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
-# pprint.pprint(interfaces_data)
-
-# interface_data = get_device_interface(ng1_host, headers, cookies, device_name, interface_id)
-# pprint.pprint(interface_data)
-
-# interface_locations = get_device_interface_locations(ng1_host, device_name, interface_id, headers, cookies)
-# pprint.pprint(interface_locations)
-
-# interface_data = get_device_interface_location(ng1_host, device_name, interface_id, location_name, headers, cookies)
-# pprint.pprint(interface_data)
-
-# Get info on all dashboard domains. Returned as a python object.
-#config_data = get_domains(ng1_host, headers, cookies)
+# next three lines for TESTING only.
+#config_data = get_service_detail(ng1_host, 'test4', headers, cookies)
 #pprint.pprint(config_data)
-
-# Get info on a specific domain, returned as a python object
-#config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
-#pprint.pprint(config_data)
-
-# Put an update to a specific domain
-# update_domain(ng1_host, domain_name, me_name, protocol_or_group_code, attribute, attribute_value, headers, cookies)
-
-# Delete a specific domain
-# delete_domain(ng1_host, domain_name, headers, cookies)
-
-# Set all APN locations based on a filename apn-list.json
-#set_apns(ng1_host, headers, cookies)
 #exit()
+
+# Initialize an empty datacenter list that we will use later to verify user input.
+datacenter_list = []
+# Initialize an empty device list that we will use later to hold their ip adresses and list of interfaces.
+device_list = {}
+
+filename = 'CiscoIOT-DataCenters' # The name of the master datacenter to gateways mapping json file.
+
+# Get info on all datacenters
+datacenter_configs, config_filename = read_config_from_json('get_datacenters', 'Null', filename, 'Null', 'Null', 'Null', 'Null')
+if datacenter_configs != False: # The mapping file was not empty
+    for datacenter in datacenter_configs["Data Centers"]:
+        datacenter_name = datacenter["name"]
+        datacenter_list.append(datacenter_name)
+        device_list[datacenter_name] = ["", []] # For each datacenter initialze an empty list for IP addr and interfaces.
+else: # The mapping file was empty or there was some other exception in reading the data in.
+    print('Unable to fetch Datacenters from CiscoIOT-DataCenters.json file. Exiting....')
+    exit()
+#print('DataCenter list is: ', datacenter_list)
+
+# Initialize an empty customer list that we will use later to verify user input.
+customer_list = []
+filename = 'CiscoIOT-Customers' # The name of the master datacenter to gateways mapping json file.
+
+# Get info on all existing customers
+customer_configs, config_filename = read_config_from_json('get_customers', 'Null', filename, 'Null', 'Null', 'Null', 'Null')
+if customer_configs != False: # The mapping file was not empty.
+    # Build up a list of all existing customers
+    for customer in customer_configs["Customers"]:
+        customer_name = customer["name"]
+        customer_list.append(customer_name)
+else: # The mapping file was empty or there was some other exception in reading the data in.
+    print('Unable to fetch Customers from CiscoIOT-Customers.json file. Exiting...')
+    exit()
+#print('Customer list is: ', customer_list)
 
 # Initialize an empty apn list that we will use later to verify user input
 apn_list = []
@@ -1441,33 +1581,11 @@ else:
     print('Unable to fetch APNs, exiting....')
     exit()
 
-# Initialize an empty datacenter list that we will use later to verify user input
-datacenter_list = ["Atlanta", "Phoenix", "San Jose", "Toronto", "Vancouver"]
-# Get info on all datacenters
-#datacenter_configs, config_filename = read_config_from_json('get_datacenters', 'Null', 'CiscoIOT-DataCenters', 'Null', 'Null', 'Null', 'Null')
-#if datacenter_configs != False:
-#    for datacenter in datacenter_configs["Data Centers"]:
-#        datacenter_name = datacenter["name"]
-#        datacenter_list.append(datacenter_name)
-#else:
-#    print('Unable to fetch Datacenter and Customers list, exiting....')
-#    exit()
-#print('DataCenter list is: ', datacenter_list)
-
-#config_data = get_app_detail(ng1_host, headers, cookies, 'DNS')
-#pprint.pprint(config_data)
-#exit()
-
-#service_name = 'test_app'
-#config_data = get_service_detail(ng1_host, service_name, headers, cookies)
-#pprint.pprint(config_data)
-#exit()
-
 # Get the new customer profile from the user
 while True:
-    profile = customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list)
-    if profile != False:
-        print(f"Profile is : {profile}")
+    profile = customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, customer_list)
+    if profile != False: # We made it through the menu Successfully.
+        print(f"Profile is : {profile}") # Display the customer attributes that the user entered.
         break
     # If the user does not confirm the new customer profile, let them start over
     else:
@@ -1476,7 +1594,7 @@ while True:
         continue
 
 # Fetch the APN id number that matches with each APN in the customer profile
-apn_ids = {}
+apn_ids = {} #Initialize an empty dictionay to hold our APN Name : APN id key-value pairs
 for apn_name in profile['apn_list']:
     apn_config = get_apn_detail(ng1_host, headers, cookies, apn_name)
     if apn_config != False:
@@ -1487,10 +1605,14 @@ for apn_name in profile['apn_list']:
         exit()
 
 # Create a network service for each APN specified that includes all availalbe MEs.
-# Start by just getting all interfaces on our one test vStream.
+# Start by just getting all interfaces on our vStreams.
 net_service_ids = {}
-device_list = {"Atlanta" : ["", []], "Phoenix" : ["", []]}
-all_interfaces_data = []
+# Here I am hardcoding them, but in the prod version I will create this list based on what was read...
+# ...in from the CiscoIOT-DataCenters master datacenter to gateway mapping file.
+# Comment out the following line for the production version of this program.
+# This device list is just for testing on a limited scale.
+device_list = {"ATL-NTCT-INF-01" : ["", []], "ATL-NTCT-INF-02" : ["", []], "PHX-NTCT-INF-01" : ["", []]}
+
 for device_name in device_list:
     # We need the ip address of each device to fill in the network service members later.
     device_detail = get_device_detail(ng1_host, headers, cookies, str(device_name))
@@ -1498,192 +1620,110 @@ for device_name in device_list:
         # Save the IP Address for each device in the devices list so that we can use them later.
         device_list[device_name][0] = device_detail['deviceConfigurations'][0]['deviceIPAddress']
         device_interfaces = get_device_interfaces(ng1_host, headers, cookies, device_name)
+        #print('\nDevice interface for this device: ', device_interfaces)
         device_interfaces = device_interfaces['interfaceConfigurations']
         # Save the current interface list for each device in the device_list to use later
         device_list[device_name][1] = device_interfaces
         # Accumulate a master dictionary that includes all interfaces for all devices
         #print('\ndevice interfaces data', device_interfaces)
-        for item in device_interfaces:
-            all_interfaces_data.append(item)
-        #print('\nall interfaces data', all_interfaces_data)
+
+# Make sure that the user entered APNs are associated to each interface for all the datacenters entered.
+# Note: If any are found to not be associated, we will print an error message and exit out.
+validate_apns_to_gateways(ng1_host, headers, cookies, profile, device_list)
 
 # Build the network services needed for each APN that the user specified for this new customer
 for apn_name in apn_ids:
-    # The first network service we will create is for All device interfaces for each apn specified
-    # The network service name takes the form of All-NWS-{apn_name}
-    # Initialize the dictionay that we will use to build up our network service definition.
-    net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
-    'exclusionListID': -1,
-    'id': -1,
-    'isAlarmEnabled': False,
-    'serviceName': 'All-NWS-' + apn_name,
-    'serviceType': 6}]}
-
-    # Add service members to the network service definition for each apn on every interface in the system
-    net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
-    # So we must interate through the master list of all interfaces and add them to our network servce...
-    # as individual members.
-    for device_interface in all_interfaces_data:
-        net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
-        'interfaceNumber': device_interface['interfaceNumber'],
-        'ipAddress': device_list[device_name][0],
-        'locationKeyInfo': [{'asi1xType': '',
-        'isLocationKey': True,
-        'keyAttr': apn_ids[apn_name],
-        'keyType': 4}],
-        'meAlias': device_interface['alias'],
-        'meName': device_interface['interfaceName']})
-
-    # Write the config_data to a JSON configuration file.
-    config_type = 'get_service_detail'
-    network_service_name = 'All-NWS-' + apn_name
-    write_config_to_json(config_type, 'Null', network_service_name, 'Null', 'Null', 'Null', 'Null', net_srv_config_data)
-    # Create the new network service.
-    create_service(ng1_host, 'Null', network_service_name, headers, cookies)
-    # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
-    net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
-    net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
-    # Add this network service id to our dictionary so we can use it later to assign domain members.
-    net_service_ids[network_service_name] = net_srv_id
-    #pprint.pprint(device_list)
-
-
-    # Now create a network service for each GSSN (All ISNG interfaces) for the datacenters that the user specified.
+    # Create a network service for all GSSNs (All ISNG interfaces) for the datacenters that the user specified.
     # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-All-GGSNs.
-    for datacenter in profile['dc_list']:
-        if datacenter.startswith('Atl'):
-            network_service_name = 'ATL-NWS-' + apn_name + '-All-GGSNs'
-        elif datacenter.startswith('Pho'):
-            network_service_name = 'PHX-NWS-' + apn_name + '-All-GGSNs'
-        elif datacenter.startswith('San'):
-            network_service_name = 'SJC-NWS-' + apn_name + '-All-GGSNs'
-        elif datacenter.startswith('Tor'):
-            network_service_name = 'TOR-NWS-' + apn_name + '-All-GGSNs'
-        elif datacenter.startswith('Van'):
-            network_service_name = 'VAN-NWS-' + apn_name + '-All-GGSNs'
+    # For every device in that datacenter, gather up the interfaces and add them as members to this network service.
 
-        # Initialize the dictionay that we will use to build up our network service definition.
-        net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
-        'exclusionListID': -1,
-        'id': -1,
-        'isAlarmEnabled': False,
-        'serviceName': network_service_name,
-        'serviceType': 6}]}
+    # For every datacenter that the user specified, create a single All-GSSNs network service.
+    if 'Atlanta' in profile['dc_list']:
+        network_service_name = 'ATL-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'ATL'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign to domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
+        # Now create the network services equal to each device interface (gateway) for all devices in this datacenter
+        net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym, net_service_ids)
+    elif 'ATL-NTCT-INF-01' in device_list:
+        network_service_name = 'ATL-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'ATL'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign to domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
 
-        # Add service members to the network service definition for each apn on every interface for that single device
-        # This means that for each datacenter specified, we should have a list of network services for all...
-        # interfaces on that datacenter ISNG device. Each network service is the combination of the device interfaces...
-        # and the APN location.
-        net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
+    if 'Phoenix' in profile['dc_list']:
+        network_service_name = 'PHX-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'PHX'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
+        # Now create the network services equal to each device interface (gateway) for all devices in this datacenter
+        net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym, net_service_ids)
+    elif 'PHX-NTCT-INF-01' in device_list:
+        network_service_name = 'PHX-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'PHX'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign to domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
 
-        for device_interface in device_list[datacenter][1]:
-            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
-            'interfaceNumber': device_interface['interfaceNumber'],
-            'ipAddress': device_list[datacenter][0],
-            'locationKeyInfo': [{'asi1xType': '',
-            'isLocationKey': True,
-            'keyAttr': apn_ids[apn_name],
-            'keyType': 4}],
-            'meAlias': device_interface['alias'],
-            'meName': device_interface['interfaceName']})
+    if 'San Jose' in profile['dc_list']:
+        network_service_name = 'SJC-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'SJC'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
+        # Now create the network services equal to each device interface (gateway) for all devices in this datacenter
+        net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym, net_service_ids)
+    elif 'SJC-NTCT-INF-01' in device_list:
+        network_service_name = 'SJC-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'SJC'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign to domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
 
-        # Write the config_data to a JSON configuration file.
-        config_type = 'get_service_detail'
-        write_config_to_json(config_type, 'Null', network_service_name, 'Null', 'Null', 'Null', 'Null', net_srv_config_data)
-        # Create the new network service.
-        create_service(ng1_host, 'Null', network_service_name, headers, cookies)
-        # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
-        net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
-        net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
-        # Add this network service id to our dictionary so we can use it later to assign domain members.
-        net_service_ids[network_service_name] = net_srv_id
+    if 'Toronto' in profile['dc_list']:
+        network_service_name = 'TOR-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'TOR'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
+        # Now create the network services equal to each device interface (gateway) for all devices in this datacenter
+        net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym, net_service_ids)
+    elif 'TOR-NTCT-INF-01' in device_list:
+        network_service_name = 'TOR-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'TOR'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign to domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
 
-    # Now create a network service for each interface on each datacenter that the user specified.
-    # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-{gateway}.
-    # The translation of interface name to gateway name is hardcoded here.
-    # Perhaps in the future we can read a master file that has all the interface to gateway mapping
-    for datacenter in profile['dc_list']:
-        for device_interface in device_list[datacenter][1]:
-            if datacenter.startswith('Atl'):
-                if device_interface['interfaceName'] == 'ATL-NTCT-INF-01':
-                    gateway = 'ATL1-GGSN'
-                elif device_interface['interfaceName'] == 'ATL-NTCT-INF-02':
-                    gateway = 'M2M-ATL-GGSN'
-                elif device_interface['interfaceName'] == 'ATL-NTCT-INF-03':
-                    gateway = 'ATL2-GGSN'
-                network_service_name = 'ATL-NWS-' + apn_name + '-' + gateway
-            elif datacenter.startswith('Pho'):
-                if device_interface['interfaceName'] == 'PHX-NTCT-INF-01':
-                    gateway = 'PHX1-GGSN'
-                elif device_interface['interfaceName'] == 'PHX-NTCT-INF-02':
-                    gateway = 'M2M-PHX-GGSN'
-                elif device_interface['interfaceName'] == 'PHX-NTCT-INF-03':
-                    gateway = 'PHX-GGSN'
-                network_service_name = 'PHX-NWS-' + apn_name + '-' + gateway
-            elif datacenter.startswith('San'):
-                if device_interface['interfaceName'] == 'SJC-NTCT-INF-01':
-                    gateway = 'SJC1-GGSN'
-                elif device_interface['interfaceName'] == 'SJC-NTCT-INF-02':
-                    gateway = 'M2M-SJC-GGSN'
-                elif device_interface['interfaceName'] == 'SJC-NTCT-INF-03':
-                    gateway = 'SJC-GGSN'
-                network_service_name = 'SJC-NWS-' + apn_name + '-' + gateway
-            elif datacenter.startswith('Tor'):
-                if device_interface['interfaceName'] == 'TOR-NTCT-INF-01':
-                    gateway = 'TOR-VPCSI1'
-                elif device_interface['interfaceName'] == 'TOR-NTCT-INF-02':
-                    gateway = 'TOR-VPCSI2'
-                network_service_name = 'TOR-NWS-' + apn_name + '-' + gateway
-            elif datacenter.startswith('Van'):
-                if device_interface['interfaceName'] == 'VAN-NTCT-INF-01':
-                    gateway = 'VAN-VPCSI1'
-                elif device_interface['interfaceName'] == 'VAN-NTCT-INF-02':
-                    gateway = 'VAN-VPCSI2'
-                network_service_name = 'VAN-NWS-' + apn_name + '-' + gateway
-
-            # Initialize the dictionay that we will use to build up our network service definition.
-            net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
-            'exclusionListID': -1,
-            'id': -1,
-            'isAlarmEnabled': False,
-            'serviceName': network_service_name,
-            'serviceType': 6}]}
-
-            # Create a network service definition for each apn for each interface for each datacenter selected
-            # This means that for each datacenter specified, we should have a list of network services for each...
-            # interface on that datacenter ISNG device. Each network service is the combination of a single device...
-            # interface and the APN location.
-            net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
-
-            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
-            'interfaceNumber': device_interface['interfaceNumber'],
-            'ipAddress': device_list[datacenter][0],
-            'locationKeyInfo': [{'asi1xType': '',
-            'isLocationKey': True,
-            'keyAttr': apn_ids[apn_name],
-            'keyType': 4}],
-            'meAlias': device_interface['alias'],
-            'meName': device_interface['interfaceName']})
-
-            # Write the config_data to a JSON configuration file.
-            config_type = 'get_service_detail'
-            write_config_to_json(config_type, 'Null', network_service_name, 'Null', 'Null', 'Null', 'Null', net_srv_config_data)
-            # Create the new network service.
-            create_service(ng1_host, 'Null', network_service_name, headers, cookies)
-            # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
-            net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
-            net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
-            # Add this network service id to our dictionary so we can use it later to assign domain members.
-            net_service_ids[network_service_name] = net_srv_id
+    if 'Vancouver' in profile['dc_list']:
+        network_service_name = 'VAN-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'VAN'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
+        # Now create the network services equal to each device interface (gateway) for all devices in this datacenter
+        net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym, net_service_ids)
+    elif 'VAN-NTCT-INF-01' in device_list:
+        network_service_name = 'VAN-NWS-' + apn_name + '-All-GGSNs'
+        dc_acronym = 'VAN'
+        # Create the network service and add the network service id to our dictionary...
+        # so we can use it later to assign to domain members.
+        net_service_ids[network_service_name] = create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_name, apn_ids, apn_name, device_list, dc_acronym)
 
 # This is a list of existing applications we intend to use. Could pull this from a file.
-app_list = ['GTPv0', 'GTPv1-Create-PDP', 'GTPv1-Update-PDP', 'GTPv1-Delete-PDP', 'GTPv2-CSR',
-           'GTPv2-UBR', 'GTPv2-MBR', 'GTPv2-DSR', 'Web', 'DNS']
+app_list = ['GTPv0/', 'GTPv1-Create-PDP/GTP_V1C:65538', 'GTPv1-Update-PDP/GTP_V1C:65546', 'GTPv1-Delete-PDP/GTP_V1C:65539', 'GTPv2-CSR/GTP_V2C:131081',
+           'GTPv2-UBR/GTP_V2C:131104', 'GTPv2-MBR/GTP_V2C:131096', 'GTPv2-DSR/GTP_V2C:131087', 'Web/', 'DNS/']
 app_service_ids = {}
 
 # Now create create the application services for GTPv0, GTPv1 and GTPv2 for each interface on each datacenter entered.
 for apn_name in apn_ids:
     for app_name in app_list:
+        protocol_or_group_code = app_name.partition('/')[2] # scrape off the protocol code after the '/'
+        #print(f'The protocol or group code is: {protocol_or_group_code}')
+        app_name = app_name.partition('/')[0] # scrape off the app name before the '/'
         for datacenter in profile['dc_list']:
             if datacenter.startswith('Atl'):
                 application_service_name = 'ATL-AS-' + app_name + '-' + apn_name
@@ -1709,12 +1749,24 @@ for apn_name in apn_ids:
             # The protocol or group code for each service member is the app name limited to 10 chars.
             if app_name == 'Web':
                 protocol_or_group_code = 'WEB'
+                is_message_type = False
                 is_protocol_group = True
+                is_message_type = False
+                message_id = 0
             elif app_name == 'DNS':
-                protocol_or_group_code = 'DNS_TCP'
+                protocol_or_group_code_list = ['DNS_TCP', 'A_DNS', 'DNSIX', 'UDP_MDNS', 'MS-DNS_U']
+                is_message_type = False
+                is_protocol_group = False
+                is_message_type = False
+                message_id = 0
+            elif app_name == 'GTPv0':
+                protocol_or_group_code = 'GTP'
+                is_message_type = False
+                message_id = 0
                 is_protocol_group = False
             else:
-                protocol_or_group_code = app_name[:10]
+                is_message_type = True
+                message_id = int(protocol_or_group_code.partition(':')[2])# Scrape off the message id after the ':'.
                 is_protocol_group = False
             #print('\nProtocol or group code is: ', protocol_or_group_code)
 
@@ -1723,24 +1775,42 @@ for apn_name in apn_ids:
                 # loop and just those interfaces for the current APN loop. The goal is to create an app service...
                 # that is specific to an APN + datacenter combination and add the related interface network...
                 # services as members of this app service.
-                if 'All' not in network_service and apn_name in network_service and network_service.startswith(application_service_name[:2]):
+                #print(f'\nNetwork Service is: {network_service}')
+                #print(f'\nNetwork Service IDs is: {net_service_ids}')
+                #print(f'\nApplication Service Name is: {application_service_name}')
+                if 'All-' not in network_service and apn_name in network_service and network_service.startswith(application_service_name[:2]):
                     net_srv_id = net_service_ids[network_service]
-                    app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
-                                        'interfaceNumber': -1,
-                                        'isNetworkDomain': True,
-                                        'isProtocolGroup': is_protocol_group,
-                                        'melID': -1,
-                                        'networkDomainID': net_srv_id,
-                                        'networkDomainName': network_service,
-                                        'protocolOrGroupCode': protocol_or_group_code})
-
-            # Write the config_data to a JSON configuration file.
-            config_type = 'get_service_detail'
-            write_config_to_json(config_type, 'Null', application_service_name, 'Null', 'Null', 'Null', 'Null', app_srv_config_data)
+                    #print(f'\nNetwork Service is: {network_service}')
+                    #print(f'\nNetwork Service ID is: {net_srv_id}')
+                    #print(f'\nApplication Service Name is: {application_service_name}')
+                    if app_name == 'DNS': # We need to append a service member for each type of DNS app desired.
+                        for protocol_or_group_code in protocol_or_group_code_list:
+                            app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                                                'interfaceNumber': -1,
+                                                'isNetworkDomain': True,
+                                                'isMessageType': is_message_type,
+                                                'messageID': message_id,
+                                                'isProtocolGroup': is_protocol_group,
+                                                'melID': -1,
+                                                'networkDomainID': net_srv_id,
+                                                'networkDomainName': network_service,
+                                                'protocolOrGroupCode': protocol_or_group_code})
+                    else: # This is not app_name 'DNS', so we only need one service member for the other applications
+                        app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                                            'interfaceNumber': -1,
+                                            'isNetworkDomain': True,
+                                            'isMessageType': is_message_type,
+                                            'messageID': message_id,
+                                            'isProtocolGroup': is_protocol_group,
+                                            'melID': -1,
+                                            'networkDomainID': net_srv_id,
+                                            'networkDomainName': network_service,
+                                            'protocolOrGroupCode': protocol_or_group_code})
             # Create the new application service.
-            create_service(ng1_host, 'Null', application_service_name, headers, cookies)
+            create_service(ng1_host, headers, cookies, 'Null', application_service_name, app_srv_config_data, False)
             # We need to know the id number that was assigned to this new app service, so we get_service_detail on it.
             app_srv_config_data = get_service_detail(ng1_host, application_service_name, headers, cookies)
+            #print(f'\nApp service config data is: {app_srv_config_data}')
             app_srv_id = app_srv_config_data['serviceDetail'][0]['id']
             # Add this application service id to our dictionary so we can use it later to assign domain members.
             app_service_ids[application_service_name] = app_srv_id
@@ -1749,142 +1819,149 @@ for apn_name in apn_ids:
 domain_tree_data = get_domains(ng1_host, headers, cookies)
 #print(f'Domain tree is: {domain_tree_data}')
 domain_name = 'Cisco IOT'
-for domain in domain_tree_data['domain']:
-    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
-        skip = True
-        print(f'[INFO] Domain: {domain_name} already exists, skipping')
-        # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
-        parent_domain_id = domain['id']
-        break
-    else:
-        skip = False
+
+# This is a domain layer that is common to all customers. If it exists, don't overwrite it
+skip, existing_parent_domain_id = domain_exists(domain_name, domain_tree_data)
+
 if skip == False: # The domain does not yet exist, create it
-    # Create the domain
+    # Create the domain.
     # Initialize an empty list of domain member ids for use when we add domains that have members.
     domain_member_ids = {}
     parent_domain_id = 1 # This is the parentID of the default 'Enterprise' domain at the top.
     parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
 
 domain_name = 'APNs'
-for domain in domain_tree_data['domain']:
-    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
-        skip = True
-        print(f'[INFO] Domain: {domain_name} already exists, skipping')
-        # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
-        parent_domain_id = domain['id']
-        break
-    else:
-        skip = False
+# This is a domain layer that is common to all customers. If it exists, don't overwrite it
+skip, existing_parent_domain_id = domain_exists(domain_name, domain_tree_data)
 if skip == False: # The domain does not yet exist, create it
     # Create the domain.
     # Initialize an empty list of domain member ids for use when we add domains that have members.
     domain_member_ids = {}
     parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
-
+else:
+    # The domain already eists, set the parent_domain_id to the existing domain.
+    parent_domain_id = existing_parent_domain_id
 
 domain_name = profile['customer_type'] + ' APNs' # This will be either 'Connected Car' or 'IOT'.
-for domain in domain_tree_data['domain']:
-    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
-        skip = True
-        print(f'[INFO] Domain: {domain_name} already exists, skipping')
-        # Set the id for this existing domain as the parent_domain_id for the next domain child to use.
-        parent_domain_id = domain['id']
-        break
-    else:
-        skip = False
+# This is a domain layer that is common to all customers. If it exists, don't overwrite it
+skip, existing_parent_domain_id = domain_exists(domain_name, domain_tree_data)
 if skip == False: # The domain does not yet exist, create it
-    # # Create the domain.
+    # Create the domain.
     # Initialize an empty list of domain member ids for use when we add domains that have members.
     domain_member_ids = {}
     parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
+else:
+    # The domain already eists, set the parent_domain_id to the existing domain.
+    parent_domain_id = existing_parent_domain_id
 
 domain_name = profile['cust_name'] # Set the domain name to be the customer name as entered in the menu
-for domain in domain_tree_data['domain']:
-    if domain_name == domain['serviceName']: # if True, the domain already exists, skip creating it
-        skip = True
-        print(f'[ERROR] Domain: {domain_name} already exists,')
-        print('Customer name must be unique. Exiting...')
-        exit()
-    else:
-        skip = False
+
+# This is a domain layer that should be unique to one customer name. If it exists, exit out.
+skip, existing_parent_domain_id = domain_exists(domain_name, domain_tree_data)
+
 if skip == False: # The domain does not yet exist, create it
     # # Create the domain.
     # The members for this customer domain will be all of the network interfaces for each APN.
     domain_member_ids = {} # Reset the list of domain members
-    for network_service_name in net_service_ids:
-        for apn_name in apn_ids:
-            if 'All-NWS-' + apn_name in network_service_name:
-                domain_member_ids[network_service_name] = net_service_ids[network_service_name]
+    # If there is only one APN, then add all datacenter interfaces for this one APN as members...
+    # of the customer domain. Otherwise, these will be added to the APN named domains.
+    if len(apn_ids) == 1: # There is only one user entered APN name.
+        for network_service_name in net_service_ids:
+            for apn_name in apn_ids:
+                if apn_name + '-All-GGSNs' in network_service_name:
+                    domain_member_ids[network_service_name] = net_service_ids[network_service_name]
     # Create the customer domain using the customer name entered in the menu.
     # Make it a child domain of either IOT APNs or Connected Car APNs.
-    cust_parent_domain_id  = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
+    customer_parent_domain_id  = build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id, domain_member_ids)
+else:
+    # The domain already exists. This should not be the case, customer names have to be unique. Exit.
+    print('The customer name entered must be unique. Exiting...')
+    exit()
 
-# Create a child domain 'Control' under the customer name domain.
-domain_member_ids = {} # Reset the list of domain members
-domain_name = 'Control'
-control_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, cust_parent_domain_id, domain_member_ids)
+# If there are more than one APN entered, we need to create domains for each named APN.
+for apn_name in apn_ids:
+    if len(apn_ids) > 1: # There are more than one user entered APN name
+        domain_name = apn_name
+        domain_member_ids = {} # Reset the list of domain members
+        # Add the All GGSNs network services as members to this domain, but only include those that...
+        # contain the APN name in this for loop.
+        for network_service_name in net_service_ids:
+            if apn_name + '-All-GGSNs' in network_service_name:
+                domain_member_ids[network_service_name] = net_service_ids[network_service_name]
+        # Create the APN named domain including the All GGSNs network services as domain members.
+        apn_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, customer_parent_domain_id, domain_member_ids)
+    else: # There is only one user entered APN name.
+        apn_parent_domain_id = customer_parent_domain_id
 
-# Create a child domain under 'Control' for each datacenter name that the user entered.
-for datacenter in profile['dc_list']:
-    domain_name = datacenter
+    # Create a child domain 'Control' under the customer name domain or under each APN if more than one.
     domain_member_ids = {} # Reset the list of domain members
-    # Build the domain for this datacenter name that will contain the GTPvx domains. Place it as a child of 'Control'.
-    dc_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, control_parent_domain_id, domain_member_ids)
-    dc_acronym = translate_dc_name_to_acronym(datacenter)
+    domain_name = 'Control'
+    control_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, apn_parent_domain_id, domain_member_ids)
 
-    #Add the GTPvx domains including the associated application services.
-    # These domains will have members, so we will build up a list to pass to build_domain_tree.
-    domain_member_ids = {} # Reset the list of domain members
-    # Look for any application service name that includes both the GTP app name as well as the datacente acronym.
-    for application_service_name in app_service_ids:
-        if 'GTPv0' in application_service_name and dc_acronym in application_service_name:
-            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+    # Create a child domain under 'Control' for each datacenter name that the user entered.
+    for datacenter in profile['dc_list']:
+        domain_name = datacenter
+        domain_member_ids = {} # Reset the list of domain members
+        # Build the domain for this datacenter name that will contain the GTPvx domains. Place it as a child of 'Control'.
+        dc_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, control_parent_domain_id, domain_member_ids)
+        dc_acronym = translate_dc_name_to_acronym(datacenter)
 
-    domain_name = 'GTPv0' # Hardcoding the domain name based on the same list of apps for all customers.
-    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
+        #Add the GTPvx domains including the associated application services.
+        # These domains will have members, so we will build up a list to pass to build_domain_tree.
+        domain_member_ids = {} # Reset the list of domain members
+        # Look for any application service name that includes both the GTP app name, the APN name and the datacenter acronym.
+        for application_service_name in app_service_ids:
+            if 'GTPv0' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+                domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
-    domain_member_ids = {} # Reset the list of members.
-    # Look for any application service name that includes both the GTP app name as well as the datacenter acronym.
-    for application_service_name in app_service_ids:
-        if 'GTPv1' in application_service_name and dc_acronym in application_service_name:
-            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+        domain_name = 'GTPv0' # Hardcoding the domain name based on the same list of apps for all customers.
+        parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
 
-    domain_name = 'GTPv1' # Hardcoding the domain name based on the same list of apps for all customers.
-    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
+        domain_member_ids = {} # Reset the list of members.
+        # Look for any application service name that includes both the GTP app name, the APN name and the datacenter acronym.
+        for application_service_name in app_service_ids:
+            if 'GTPv1' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+                domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
-    domain_member_ids = {} # Reset the list of members.
-    # Look for any application service name that includes both the GTP app name as well as the datacenter acronym.
-    for application_service_name in app_service_ids:
-        if 'GTPv2' in application_service_name and dc_acronym in application_service_name:
-            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+        domain_name = 'GTPv1' # Hardcoding the domain name based on the same list of apps for all customers.
+        parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
 
-    domain_name = 'GTPv2' # Hardcoding the domain name based on the same list of apps for all customers.
-    parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
+        domain_member_ids = {} # Reset the list of members.
+        # Look for any application service name that includes both the GTP app name, the APN name and the datacenter acronym.
+        for application_service_name in app_service_ids:
+            if 'GTPv2' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+                domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
-# Add the User domain as a child to the customer domain.
-domain_member_ids = {} # Reset the list of members
-for datacenter in profile['dc_list']:
-    # Include the web app service memembers associated to this APN and datacenter.
-    dc_acronym = translate_dc_name_to_acronym(datacenter)
-    # Look for any application service name that includes both the Web app name as well as the datacenter acronym.
-    for application_service_name in app_service_ids:
-        if 'Web' in application_service_name and dc_acronym in application_service_name:
-            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+        domain_name = 'GTPv2' # Hardcoding the domain name based on the same list of apps for all customers.
+        parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, dc_parent_domain_id, domain_member_ids)
 
-domain_name = 'User' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
-user_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, cust_parent_domain_id, domain_member_ids)
+    domain_member_ids = {} # Reset the list of members
+    for datacenter in profile['dc_list']:
+        dc_acronym = translate_dc_name_to_acronym(datacenter)
+        # Add the User domain as a child to the customer domain if only one APN.
+        # If more than one APN, the User domain is a child to each APN named domain.
 
-# Add the DNS domain including the DNS app service memembers associated to this APN
-domain_member_ids = {} # Reset the list of members
-for datacenter in profile['dc_list']:
-    dc_acronym = translate_dc_name_to_acronym(datacenter)
-    # Look for any application service name that includes both the DNS app name as well as the datacenter acronym.
-    for application_service_name in app_service_ids:
-        if 'DNS' in application_service_name and dc_acronym in application_service_name:
-            domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+        # Look for any application service name that includes both the Web app name, the APN name and the datacenter acronym.
+        for application_service_name in app_service_ids:
+            if 'Web' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+                domain_member_ids[application_service_name] = app_service_ids[application_service_name]
+
+    domain_name = 'User' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
+    user_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, apn_parent_domain_id, domain_member_ids)
+
+    domain_member_ids = {} # Reset the list of members
+    for datacenter in profile['dc_list']:
+        dc_acronym = translate_dc_name_to_acronym(datacenter)
+        # Add the DNS domain as a child to the customer domain if only one APN.
+        # If more than one APN, the User domain is a child to each APN named domain.
+
+        # Look for any application service name that includes both the DNS app name, the APN name and the datacenter acronym.
+        for application_service_name in app_service_ids:
+            if 'DNS' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+                domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
     domain_name = 'DNS' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
-    dns_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, cust_parent_domain_id, domain_member_ids)
+    dns_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, apn_parent_domain_id, domain_member_ids)
 
 #FOR TESTING: Delete everything
 #domain_name = 'Cisco IOT'
@@ -1908,7 +1985,7 @@ for datacenter in profile['dc_list']:
 # delete_service(ng1_host, service_name, headers, cookies)
 
 # Create a specific service
-# create_service(ng1_host, service_type, service_name, headers, cookies)
+# create_service(ng1_host, headers, cookies, service_type, service_name, config_data, save)
 
 # Get all applications
 # config_data = get_applications(ng1_host, headers, cookies)
@@ -1976,5 +2053,47 @@ for datacenter in profile['dc_list']:
 #    filtered_all_interface_locations = get_devices_interfaces_vlans_sorted(ng1_host, device_name, headers, cookies)
 #    # Take the combined locations list for a device and save it to CSV
 #    write_device_interfaces_locations_config_to_csv(device_name, filtered_all_interface_locations)
+# Put a modification to a specific device
+# update_device(ng1_host, device_name, headers, cookies)
+
+# Get info on all devices, returned as a python object
+# devices_data = get_devices(ng1_host, headers, cookies)
+# pprint.pprint(devices_data)
+
+# Get info on a specific device, returned as a python object
+# device_data = get_device(ng1_host, device_name, headers, cookies)
+# pprint.pprint(device_data)
+
+# Get info on all the interface on a specific Device
+# interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
+# pprint.pprint(interfaces_data)
+
+# interface_data = get_device_interface(ng1_host, headers, cookies, device_name, interface_id)
+# pprint.pprint(interface_data)
+
+# interface_locations = get_device_interface_locations(ng1_host, device_name, interface_id, headers, cookies)
+# pprint.pprint(interface_locations)
+
+# interface_data = get_device_interface_location(ng1_host, device_name, interface_id, location_name, headers, cookies)
+# pprint.pprint(interface_data)
+
+# Get info on all dashboard domains. Returned as a python object.
+#config_data = get_domains(ng1_host, headers, cookies)
+#pprint.pprint(config_data)
+
+# Get info on a specific domain, returned as a python object
+#config_data = get_domain_detail(ng1_host, domain_name, headers, cookies)
+#pprint.pprint(config_data)
+
+# Put an update to a specific domain
+# update_domain(ng1_host, domain_name, me_name, protocol_or_group_code, attribute, attribute_value, headers, cookies)
+
+# Delete a specific domain
+# delete_domain(ng1_host, domain_name, headers, cookies)
+
+# Set all APN locations based on a filename apn-list.json
+#set_apns(ng1_host, headers, cookies)
+#exit()
+
 
 close_session(ng1_host, headers, cookies)
