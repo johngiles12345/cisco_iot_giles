@@ -16,6 +16,31 @@ import logging
 # disable the warnings for ignoring Self Signed Certificates
 requests.packages.urllib3.disable_warnings()
 
+def extend_customer_profile(ng1_host, headers, cookies, profile, device_list):
+    # This function takes in the user entered profile and the device_list.
+    # It will use the datacenters entered by the user to filter the device list.
+    # Then it will get all the interfaces (gateways) for each device belonging to those datacenters.
+    # Then it will put all those gateway names in a list.
+    # Then it will extend the current customer profile to include the list of gateways for each APN.
+    # If Successful, it will return the extended profile as a dictionary to be appended to the customer...
+    # json file.
+    gateways = []
+    extended_profile = {'name': profile['cust_name'], 'type': profile['customer_type'], 'APNs': [{}]}
+    for datacenter in profile['dc_list']:
+        for device_name in device_list:
+            if datacenter[:2].upper() == device_name[:2].upper():
+                interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
+                for interface in interfaces_data['interfaceConfigurations']:
+                    interface_name = interface['interfaceName']
+                    gateways.append(interface_name)
+                    for apn_name in profile['apn_list']:
+                        extended_profile['APNs'][0][apn_name] = gateways
+
+    print(f'Extended profile is: {extended_profile}')
+    exit()
+    return True
+
+
 def validate_apns_to_gateways(ng1_host, headers, cookies, profile, device_list):
     # This function takes in the user entered profile and the device_list.
     # It will use the datacenters entered by the user to filter the device list.
@@ -35,8 +60,6 @@ def validate_apns_to_gateways(ng1_host, headers, cookies, profile, device_list):
                             exit()
 
     return True
-
-
 
 def check_splcharacter(test, no_comma):
     # Function checks if the input string(test) contains any special character or not.
@@ -163,7 +186,7 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, network_service_nam
     return net_srv_id
 
 
-def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, customer_list):
+def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, customer_list, device_list):
     # This function is an entry menu for entering new customer information.
     # It takes in a customer name, a list of APNs, the customer type and a list of valid datacenters.
     # It returns the user's entries as a profile dictionary.
@@ -315,7 +338,6 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         else:
             print("Invalid entry, please enter 'y' or 'n'")
             continue
-
 
 def open_session(ng1_host, headers, cookies, credentials):
     open_session_uri = "/ng1api/rest-sessions"
@@ -1536,22 +1558,64 @@ cookies = open_session(ng1_host, headers, cookies, credentials)
 
 # Initialize an empty datacenter list that we will use later to verify user input.
 datacenter_list = []
-# Initialize an empty device list that we will use later to hold their ip adresses and list of interfaces.
-device_list = {}
+# Initialize an empty device list that we will use later to hold their ip adresses, dict of interfaces...
+# and each interface (gateway) has a list of APNs associated to it
+device_list = defaultdict(list)
 
 filename = 'CiscoIOT-DataCenters' # The name of the master datacenter to gateways mapping json file.
 
 # Get info on all datacenters
 datacenter_configs, config_filename = read_config_from_json('get_datacenters', 'Null', filename, 'Null', 'Null', 'Null', 'Null')
 if datacenter_configs != False: # The mapping file was not empty
+    # Fetch the devices that exist in the system
+    devices_data = get_devices(ng1_host, headers, cookies)
+    # For every device in the system, fetch the IP address and list of interfaces.
+    # We will need to pull from this dictionary later to create services.
+    # Loop through each device and add it to our dictionary
+    for device in devices_data['deviceConfigurations']:
+        #pprint.pprint(f'Device is {device}')
+        device_name = device['deviceName']
+        # We need the ip address of each device to fill in the network service members later.
+        device_list[device_name].append({'deviceIPAddress': device['deviceIPAddress']})
+        # Each device will have a list of interfaces, so initialize that empty list.
+        device_list[device_name].append({'interfaces': []})
+        # Get all the info for all the interfaces on this device.
+        device_interfaces = get_device_interfaces(ng1_host, headers, cookies, device_name)
+        if device_interfaces == False: # Failed to get device interfaces.
+            print(f'[CRITICAL] Unable to fetch interfaces from {device_name}. Exiting....')
+            exit()
+        else: # get device interfaces was successful.
+            # Pull out the interface list from the device_interfaces data.
+            device_interfaces = device_interfaces['interfaceConfigurations']
+            # Initialize a counter for appending APNs to the correct interface in our dictionary.
+            interface_count = 0
+        # Loop through each interface and append its attributes to our dictionary.
+        for device_interface in device_interfaces:
+            interface_name = device_interface['interfaceName']
+            # Initialize the list that will contain the interfaces of this device.
+            device_list[device_name][1]['interfaces'].append({interface_name: []})
+            # Initialize the list that will contain the APNs for each interface.
+            device_list[device_name][1]['interfaces'][interface_count][interface_name].append({'APNs': []})
+            interface_number = str(device_interface['interfaceNumber'])
+            # Fetch all the APNs associated to this interface.
+            apn_data = get_apns_on_an_interface(ng1_host, headers, cookies, device_name, interface_number)
+            if apn_data == {}: # There are no APNs associated to this interface.
+                print(f'[INFO] There are no APNs associated to interface {interface_number} on Device {device_name}')
+            else: # There is one or more APNs associated to this interface.
+                for apn in apn_data['apnAssociations']:
+                    # Add the APN to the interface attributes in our dictionay.
+                    device_list[device_name][1]['interfaces'][interface_count][interface_name][0]['APNs'].append(apn)
+            # Increment the interface count for the next loop in case there is more than one.
+            interface_count += 1
+
+    # Build the list of available datacenters for the user to select from in customer_menu.
     for datacenter in datacenter_configs["Data Centers"]:
         datacenter_name = datacenter["name"]
         datacenter_list.append(datacenter_name)
-        device_list[datacenter_name] = ["", []] # For each datacenter initialze an empty list for IP addr and interfaces.
+
 else: # The mapping file was empty or there was some other exception in reading the data in.
-    print('Unable to fetch Datacenters from CiscoIOT-DataCenters.json file. Exiting....')
+    print('[CRITICAL] Unable to fetch Datacenters from CiscoIOT-DataCenters.json file. Exiting....')
     exit()
-#print('DataCenter list is: ', datacenter_list)
 
 # Initialize an empty customer list that we will use later to verify user input.
 customer_list = []
@@ -1567,11 +1631,10 @@ if customer_configs != False: # The mapping file was not empty.
 else: # The mapping file was empty or there was some other exception in reading the data in.
     print('Unable to fetch Customers from CiscoIOT-Customers.json file. Exiting...')
     exit()
-#print('Customer list is: ', customer_list)
 
-# Initialize an empty apn list that we will use later to verify user input
+# Initialize an empty apn list that we will use later to verify user input.
 apn_list = []
-# Get info on all APN locations
+# Get info on all APN locations system-wide.
 apn_configs = get_apns(ng1_host, headers, cookies)
 if apn_configs != False:
     for apn in apn_configs["apns"]:
@@ -1583,7 +1646,7 @@ else:
 
 # Get the new customer profile from the user
 while True:
-    profile = customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, customer_list)
+    profile = customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, customer_list, device_list)
     if profile != False: # We made it through the menu Successfully.
         print(f"Profile is : {profile}") # Display the customer attributes that the user entered.
         break
@@ -1607,29 +1670,11 @@ for apn_name in profile['apn_list']:
 # Create a network service for each APN specified that includes all availalbe MEs.
 # Start by just getting all interfaces on our vStreams.
 net_service_ids = {}
-# Here I am hardcoding them, but in the prod version I will create this list based on what was read...
-# ...in from the CiscoIOT-DataCenters master datacenter to gateway mapping file.
-# Comment out the following line for the production version of this program.
-# This device list is just for testing on a limited scale.
-device_list = {"ATL-NTCT-INF-01" : ["", []], "ATL-NTCT-INF-02" : ["", []], "PHX-NTCT-INF-01" : ["", []]}
 
-for device_name in device_list:
-    # We need the ip address of each device to fill in the network service members later.
-    device_detail = get_device_detail(ng1_host, headers, cookies, str(device_name))
-    if device_detail != False:
-        # Save the IP Address for each device in the devices list so that we can use them later.
-        device_list[device_name][0] = device_detail['deviceConfigurations'][0]['deviceIPAddress']
-        device_interfaces = get_device_interfaces(ng1_host, headers, cookies, device_name)
-        #print('\nDevice interface for this device: ', device_interfaces)
-        device_interfaces = device_interfaces['interfaceConfigurations']
-        # Save the current interface list for each device in the device_list to use later
-        device_list[device_name][1] = device_interfaces
-        # Accumulate a master dictionary that includes all interfaces for all devices
-        #print('\ndevice interfaces data', device_interfaces)
 
-# Make sure that the user entered APNs are associated to each interface for all the datacenters entered.
-# Note: If any are found to not be associated, we will print an error message and exit out.
-validate_apns_to_gateways(ng1_host, headers, cookies, profile, device_list)
+print(f'Device list is: {device_list}')
+exit()
+#extended_profile = extend_customer_profile(ng1_host, headers, cookies, profile, device_list)
 
 # Build the network services needed for each APN that the user specified for this new customer
 for apn_name in apn_ids:
