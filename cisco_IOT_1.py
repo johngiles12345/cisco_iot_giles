@@ -16,31 +16,6 @@ import logging
 # disable the warnings for ignoring Self Signed Certificates
 requests.packages.urllib3.disable_warnings()
 
-def extend_customer_profile(ng1_host, headers, cookies, profile, device_list):
-    # This function takes in the user entered profile and the device_list.
-    # It will use the datacenters entered by the user to filter the device list.
-    # Then it will get all the interfaces (gateways) for each device belonging to those datacenters.
-    # Then it will put all those gateway names in a list.
-    # Then it will extend the current customer profile to include the list of gateways for each APN.
-    # If Successful, it will return the extended profile as a dictionary to be appended to the customer...
-    # json file.
-    gateways = []
-    extended_profile = {'name': profile['cust_name'], 'type': profile['customer_type'], 'APNs': [{}]}
-    for datacenter in profile['dc_list']:
-        for device_name in device_list:
-            if datacenter[:2].upper() == device_name[:2].upper():
-                interfaces_data = get_device_interfaces(ng1_host, headers, cookies, device_name)
-                for interface in interfaces_data['interfaceConfigurations']:
-                    interface_name = interface['interfaceName']
-                    gateways.append(interface_name)
-                    for apn_name in profile['apn_list']:
-                        extended_profile['APNs'][0][apn_name] = gateways
-
-    print(f'Extended profile is: {extended_profile}')
-    exit()
-    return True
-
-
 def validate_apns_to_gateways(ng1_host, headers, cookies, profile, device_list):
     # This function takes in the user entered profile and the device_list.
     # It will use the datacenters entered by the user to filter the device list.
@@ -193,7 +168,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     # Return False if the user messes up and wants to start over
 
     # Create an empty dictionary that will hold our customer menu entries.
-    profile = {}
+    profile = {'name':"", 'type':"", 'APNs':[{'APN':[]}]}
     # Create an empty list that will contain one or more APN entries.
     apn_entry_list = []
     # Initialize a variable to capture a user's yes or no reponse.
@@ -217,11 +192,32 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             break
 
     if user_entry == '':
-        profile['cust_name'] = 'Giles'
+        profile['name'] = 'Giles'
     elif user_entry.lower() == 'exit':
         exit()
     else:
-        profile['cust_name'] = user_entry
+        profile['name'] = user_entry
+
+    print('Please select the customer type:')
+    print('[1] IOT')
+    print('[2] Connected Cars')
+    while True:
+        user_entry = input('Enter 1 or 2: ').lower()
+        if user_entry == 'exit':
+            exit()
+        elif user_entry == '':
+            # For testing, allow the user to just hit enter
+            profile['type'] = 'Connected Cars'
+            break
+        elif user_entry == '1':
+            profile['type'] = 'IOT'
+            break
+        elif user_entry == '2':
+            profile['type'] = 'Connected Cars'
+            break
+        else:
+            print("Invalid entry, please enter either '1' or '2'")
+            continue
 
     print("\nCurrent APNs available are: ")
     print(sorted(apn_list), '\n')
@@ -253,74 +249,136 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
 
     for apn_entry in apn_entry_list:
         if apn_entry not in apn_list:
-            print(f"APN: {apn_entry} does not yet exist")
+            print(f"[ERROR] APN: {apn_entry} does not yet exist")
             print(f"Please create APN: {apn_entry} first and then run this program again")
             print("No nG1 modifications will be made. Exiting...")
             exit()
 
-    profile['apn_list'] = apn_entry_list
+    apn_loop_counter = 0
+    valid_datacenters = []
+    valid_gateways = []
+    for apn_entry in apn_entry_list:
+        valid_datacenters.append({apn_entry:[]})
+        valid_gateways.append({apn_entry:[]})
+        for datacenter in datacenter_list:
+            for device_name in device_list:
+                if datacenter[:2].upper() == device_name[:2].upper(): # Look for APN associations in this datacenter.
+                    interface_loop_counter = 0
+                    for key, value in device_list[device_name][1]['interfaces'][interface_loop_counter].items():
+                        gateway = key
+                        gateway_apns = value[0]['APNs']
+                        #print(f'gateway is: {gateway}')
+                        #print(f'gateway_apns is: {gateway_apns}')
+                        if apn_entry in gateway_apns:
+                            valid_gateways[apn_loop_counter][apn_entry].append(gateway)
+                            if datacenter not in valid_datacenters[apn_loop_counter][apn_entry]:
+                                valid_datacenters[apn_loop_counter][apn_entry].append(datacenter)
+                            #print(f'valid_datacenters is: {valid_datacenters}')
+                            #print(f'valid_gateways is: {valid_gateways}')
+                        else:
+                            apn_entry_in_gateway = False
 
-    print('Please select the customer type:')
-    print('[1] IOT')
-    print('[2] Connected Car')
-    while True:
-        user_entry = input('Enter 1 or 2: ').lower()
-        if user_entry == 'exit':
-            exit()
-        elif user_entry == '':
+                        interface_loop_counter += 1
+        apn_loop_counter += 1
+    print(f'valid_datacenters is: {valid_datacenters}')
+    print(f'valid_gateways is: {valid_gateways}')
+
+    # Add the user entered APNs to the customer profile dictionary.
+    for apn_entry in apn_entry_list:
+        profile['APNs'][0]['APN'].append({'name':apn_entry, 'gateways':[{'gateway':[]}]})
+
+    apn_loop_counter = 0
+    for apn_entry in apn_entry_list:
+        valid_datacenters_list = valid_datacenters[apn_loop_counter][apn_entry]
+        valid_gateways_list = valid_gateways[apn_loop_counter][apn_entry]
+
+        print(f"\nDatacenters associated to APN {apn_entry} are: {valid_datacenters_list}")
+
+        # Initialize an empty list to hold user entered datacenters
+        dc_entry_list = []
+        while True:
+            # User enters one or more Datacenters.
+            user_entry = input("Please enter one or more Datacenters from the list separated by comma or all: ")
+            if check_splcharacter(user_entry, False) == True:
+                continue
+            else:
+                break
+        if user_entry == '':
             # For testing, allow the user to just hit enter
-            profile['customer_type'] = 'Connected Car'
-            break
-        elif user_entry == '1':
-            profile['customer_type'] = 'IOT'
-            break
-        elif user_entry == '2':
-            profile['customer_type'] = 'Connected Car'
-            break
-        else:
-            print("Invalid entry, please enter either '1' or '2'")
-            continue
-
-    print("\nCurrent Datacenters available are: ")
-    print(sorted(datacenter_list), '\n')
-    # Initialize an empty list to hold user entered datacenters
-    dc_entry_list = []
-    while True:
-        # User enters one or more Datacenters.
-        user_entry = input("Please enter one or more Datacenters from the list separated by comma: ")
-        if check_splcharacter(user_entry, False) == True:
-            continue
-        else:
-            break
-    if user_entry == '':
-        # For testing, allow the user to just hit enter
-        dc_entry_list.append('Atlanta')
-    elif user_entry.lower() == 'exit':
-        exit()
-    else:
-        # If more than one datacenter is entered, split the string into a list of datacenters
-        dc_entry_list = user_entry.split(',')
-        # Remove any leading or trailing whitespace from list members
-        i = 0
-        for dc_entry in dc_entry_list:
-            dc_entry_list[i] = dc_entry.strip()
-            i += 1
-
-    for dc_entry in dc_entry_list:
-        if dc_entry not in datacenter_list:
-            print(f"[Error] Datacenter: {dc_entry} does not yet exist")
-            print(f"Please create Datacenter: {dc_entry} first and then run this program again")
-            print("No nG1 modifications will be made. Exiting...")
+            dc_entry_list = valid_datacenters_list
+        elif user_entry.lower() == 'all':
+            # User selects all of the valid datacenters listed
+            dc_entry_list = valid_datacenters_list
+        elif user_entry.lower() == 'exit':
             exit()
+        else:
+            # If more than one datacenter is entered, split the string into a list of datacenters
+            dc_entry_list = user_entry.split(',')
+            # Remove any leading or trailing whitespace from list members
+            i = 0
+            for dc_entry in dc_entry_list:
+                dc_entry_list[i] = dc_entry.strip()
+                i += 1
 
-    profile['dc_list'] = dc_entry_list
+        for dc_entry in dc_entry_list:
+            if dc_entry not in valid_datacenters_list:
+                #print(f'dc_entry is: {dc_entry} and dc_entry_list is: {dc_entry_list} and valid_datacenters_list is: {valid_datacenters_list}')
+                print(f"[ERROR] Datacenter: {dc_entry} is not in the list of valid datacenters {valid_datacenters_list}")
+                print(f"Please create Datacenter: {dc_entry} first and then run this program again")
+                print("No nG1 modifications will be made. Exiting...")
+                exit()
 
+        for dc_entry in dc_entry_list:
+            filtered_gateways_list = []
+            for valid_gateway in valid_gateways_list:
+                dc_acronym = translate_dc_name_to_acronym(dc_entry)
+                if dc_acronym in valid_gateway:
+                    filtered_gateways_list.append(valid_gateway)
+            print(f"\nGateways associated to APN {apn_entry} in {dc_entry} are: {filtered_gateways_list}")
+            while True:
+                # User enters one or more Datacenters.
+                user_entry = input("Please enter one or more Gateways from the list separated by comma or all: ")
+                if check_splcharacter(user_entry, False) == True:
+                    continue
+                else:
+                    break
+            if user_entry == '':
+                # For testing, allow the user to just hit enter
+                gateway_entry_list = filtered_gateways_list
+            elif user_entry.lower() == 'exit':
+                exit()
+            elif user_entry.lower() == 'all':
+                gateway_entry_list = filtered_gateways_list
+            else:
+                # If more than one gateway is entered, split the string into a list of gateways
+                gateway_entry_list = user_entry.split(',')
+                # Remove any leading or trailing whitespace from list members
+                i = 0
+                for gateway_entry in gateway_entry_list:
+                    gateway_entry_list[i] = gateway_entry.strip()
+                    i += 1
+
+            for gateway_entry in gateway_entry_list:
+                if gateway_entry not in valid_gateways_list:
+                    print(f"[ERROR] Gateway: {gateway_entry} is not in the list of valid gateways {valid_gateways_list}")
+                    print(f"Please create Gateway: {gateway_entry} first and then run this program again")
+                    print("No nG1 modifications will be made. Exiting...")
+                    exit()
+
+            # Add the user entered APNs to the customer profile dictionary.
+            for gateway_entry in gateway_entry_list:
+                profile['APNs'][0]['APN'][apn_loop_counter]['gateways'][0]['gateway'].append({'name':gateway_entry})
+        apn_loop_counter += 1
+
+    print(f'\nCustomer profile is: {profile}')
+
+    exit()
     print('-------------------------------------------')
     print('Confirm new customer profile:')
     print(f"Customer Name: {profile['cust_name']}")
+    print(f"Customer Type: {profile['customer_type']}")
     for apn in apn_entry_list:
         print(f"APN: {apn}")
-    print(f"Customer Type: {profile['customer_type']}")
     for dc in dc_entry_list:
         print(f"Datacenter: {dc}")
     print('-------------------------------------------')
@@ -341,7 +399,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
 
 def open_session(ng1_host, headers, cookies, credentials):
     open_session_uri = "/ng1api/rest-sessions"
-    open_session_url = "https://" + ng1_host + open_session_uri
+    open_session_url = ng1_host + open_session_uri
 
     # For troubleshooting, you can print the url string prior to the post operation
     #print('Open Session URL: ' + request_url(open_session_url, headers))
@@ -394,21 +452,7 @@ def open_session(ng1_host, headers, cookies, credentials):
 
 def close_session(ng1_host, headers, cookies):
     close_session_uri = "/ng1api/rest-sessions/close"
-    close_session_url = "https://" + ng1_host + close_session_uri
-    # perform the HTTPS API call
-    close = requests.request("POST", close_session_url, headers=headers, verify=False, cookies=cookies)
-
-    if close.status_code == 200:
-        # success
-        print('[INFO] Closed Session Successfully')
-        return True
-    else:
-        print('[FAIL] closing session')
-        print('Response Code:', close.status_code)
-        print('Response Body:', close.text)
-        return False
-    close_session_uri = "/ng1api/rest-sessions/close"
-    close_session_url = "https://" + ng1_host + close_session_uri
+    close_session_url = ng1_host + close_session_uri
     # perform the HTTPS API call
     close = requests.request("POST", close_session_url, headers=headers, verify=False, cookies=cookies)
 
@@ -589,7 +633,7 @@ def read_config_from_json(config_type, service_type, service_name, app_name, dev
 
 def get_applications(ng1_host, headers, cookies):
     app_uri = "/ng1api/ncm/applications/"
-    url = "https://" + ng1_host + app_uri
+    url = ng1_host + app_uri
 
     # perform the HTTPS API call to get the Services information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -611,7 +655,7 @@ def get_applications(ng1_host, headers, cookies):
 
 def get_app_detail(ng1_host, headers, cookies, app_name):
     service_uri = "/ng1api/ncm/applications/"
-    url = "https://" + ng1_host + service_uri + app_name
+    url = ng1_host + service_uri + app_name
 
     # perform the HTTPS API call to get the Service information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -633,7 +677,7 @@ def get_app_detail(ng1_host, headers, cookies, app_name):
 
 def update_app(ng1_host, app_name, attribute, attribute_value, headers, cookies):
     service_uri = "/ng1api/ncm/applications/"
-    url = "https://" + ng1_host + service_uri + app_name
+    url = ng1_host + service_uri + app_name
 
     # First we will pull the details of the app and then update the desired field
     app_data = get_app_detail(ng1_host, headers, cookies, app_name)
@@ -691,7 +735,7 @@ def update_app(ng1_host, app_name, attribute, attribute_value, headers, cookies)
 
 def activate_app(ng1_host, app_name, headers, cookies):
     service_uri = "/ng1api/ncm/applications/"
-    url = "https://" + ng1_host + service_uri + "activate"
+    url = ng1_host + service_uri + "activate"
 
     # First we will pull the details of the app to get the applicationTypeCode
     app_data = get_app_detail(ng1_host, headers, cookies, app_name)
@@ -723,7 +767,7 @@ def activate_app(ng1_host, app_name, headers, cookies):
 
 def deactivate_app(ng1_host, app_name, headers, cookies):
     service_uri = "/ng1api/ncm/applications/"
-    url = "https://" + ng1_host + service_uri + "deactivate"
+    url = ng1_host + service_uri + "deactivate"
     # First we will pull the details of the app to get the applicationTypeCode
     app_data = get_app_detail(ng1_host, headers, cookies, app_name)
     # Next, we need to determine the applicationTypeCode as the api post will require
@@ -767,7 +811,7 @@ def create_app(ng1_host, app_name, headers, cookies):
 
     # Read in the json file to get all the app attributes
     app_data, config_filename = read_config_from_json(config_type, service_type, service_name, app_name, device_name, interface_id, location_name)
-    url = "https://" + ng1_host + service_uri
+    url = ng1_host + service_uri
 
     # Add the parent_app passed into the function as an additional application attribute
     # app_data["applicationConfigurations"][0]["ParentApplication"] = parent_app
@@ -797,7 +841,7 @@ def create_app(ng1_host, app_name, headers, cookies):
 
 def delete_app(ng1_host, app_name, headers, cookies):
     service_uri = "/ng1api/ncm/applications/"
-    url = "https://" + ng1_host + service_uri + app_name
+    url = ng1_host + service_uri + app_name
     # Perform the HTTPS API Delete call by passing the app_name.
     # This will delete the specific application configuration for this app_name.
     delete = requests.delete(url, headers=headers, verify=False, cookies=cookies)
@@ -817,7 +861,7 @@ def delete_app(ng1_host, app_name, headers, cookies):
 
 def get_apns(ng1_host, headers, cookies):
     uri = "/ng1api/ncm/apns/"
-    url = "https://" + ng1_host + uri
+    url = ng1_host + uri
 
     # perform the HTTPS API call to get the All APNs information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -839,7 +883,7 @@ def get_apns(ng1_host, headers, cookies):
 
 def get_apn_detail(ng1_host, headers, cookies, apn_name):
     uri = "/ng1api/ncm/apns/"
-    url = "https://" + ng1_host + uri + apn_name
+    url = ng1_host + uri + apn_name
 
     # perform the HTTPS API call to get the APN detail information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -861,7 +905,7 @@ def get_apn_detail(ng1_host, headers, cookies, apn_name):
 
 def get_apns_on_an_interface(ng1_host, headers, cookies, device_name, interface_number):
     uri = "/ng1api/ncm/devices/"
-    url = "https://" + ng1_host + uri + device_name + "/interfaces/" + interface_number + "/associateapns"
+    url = ng1_host + uri + device_name + "/interfaces/" + interface_number + "/associateapns"
 
     # perform the HTTPS API call to get the APN detail information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -893,7 +937,7 @@ def set_apns(ng1_host, headers, cookies):
 
     # Read in the json file to get all the service attributes
     service_data, config_filename = read_config_from_json(config_type, service_type, service_name, app_name, device_name, interface_id, location_name)
-    url = "https://" + ng1_host + service_uri
+    url = ng1_host + service_uri
 
     # use json.dumps to provide a serialized json object (a string actually)
     # this json_string will become our new configuration for this service_name
@@ -956,7 +1000,7 @@ def build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id,
 
 def get_domains(ng1_host, headers, cookies):
     service_uri = "/ng1api/ncm/domains/"
-    url = "https://" + ng1_host + service_uri
+    url = ng1_host + service_uri
 
     # perform the HTTPS API call to get the Domains information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -978,7 +1022,7 @@ def get_domains(ng1_host, headers, cookies):
 
 def get_domain_detail(ng1_host, domain_name, headers, cookies):
     service_uri = "/ng1api/ncm/domains/"
-    url = "https://" + ng1_host + service_uri + domain_name
+    url = ng1_host + service_uri + domain_name
 
     # perform the HTTPS API call to get the Service information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -1004,7 +1048,7 @@ def get_domain_detail(ng1_host, domain_name, headers, cookies):
 def create_domain(ng1_host, domain_name, headers, cookies, parent_config_data):
     # Create a new dashboard domain using parent_config_data that contain all the attributes.
     service_uri = "/ng1api/ncm/domains/"
-    url = "https://" + ng1_host + service_uri
+    url = ng1_host + service_uri
     # use json.dumps to provide a serialized json object (a string actually).
     # This json_string will become our new configuration for this domain_name.
     json_string = json.dumps(parent_config_data)
@@ -1030,7 +1074,7 @@ def create_domain(ng1_host, domain_name, headers, cookies, parent_config_data):
 
 def delete_domain(ng1_host, domain_name, headers, cookies):
     service_uri = "/ng1api/ncm/domains/"
-    url = "https://" + ng1_host + service_uri + domain_name
+    url = ng1_host + service_uri + domain_name
     # Perform the HTTPS API Delete call by passing the service_name.
     # This will delete the specific service configuration for this service_name.
     delete = requests.delete(url, headers=headers, verify=False, cookies=cookies)
@@ -1050,7 +1094,7 @@ def delete_domain(ng1_host, domain_name, headers, cookies):
 
 def get_devices(ng1_host, headers, cookies):
     device_uri = "/ng1api/ncm/devices/"
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1071,7 +1115,7 @@ def get_devices(ng1_host, headers, cookies):
 
 def get_device_detail(ng1_host, headers, cookies, device_name):
     uri = "/ng1api/ncm/devices/"
-    url = "https://" + ng1_host + uri + device_name
+    url = ng1_host + uri + device_name
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1092,7 +1136,7 @@ def get_device_detail(ng1_host, headers, cookies, device_name):
 
 def get_services(ng1_host, service_type, headers, cookies):
     service_uri = "/ng1api/ncm/services/"
-    url = "https://" + ng1_host + service_uri
+    url = ng1_host + service_uri
     # Check to see if we are fetching app, network or all services
     if service_type == 'all':
         service_type = 'Null'
@@ -1123,7 +1167,7 @@ def get_services(ng1_host, service_type, headers, cookies):
 
 def get_service_detail(ng1_host, service_name, headers, cookies):
     service_uri = "/ng1api/ncm/services/"
-    url = "https://" + ng1_host + service_uri + service_name
+    url = ng1_host + service_uri + service_name
 
     # perform the HTTPS API call to get the Service information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -1145,7 +1189,7 @@ def get_service_detail(ng1_host, service_name, headers, cookies):
 
 def update_service(ng1_host, service_name, service_type, me_name, protocol_or_group_code, attribute, attribute_value, headers, cookies):
     service_uri = "/ng1api/ncm/services/"
-    url = "https://" + ng1_host + service_uri + service_name
+    url = ng1_host + service_uri + service_name
 
     # It seems that the service ID number is required to make an update_app
     # So we have to first pull the details of the service and then update the desired field
@@ -1184,7 +1228,7 @@ def create_service(ng1_host, headers, cookies, service_type, service_name, confi
 
     service_uri = "/ng1api/ncm/services/"
 
-    url = "https://" + ng1_host + service_uri
+    url = ng1_host + service_uri
 
     # if the save option is True, then save a copy of this configuration to a json file
     if save == True:
@@ -1214,7 +1258,7 @@ def create_service(ng1_host, headers, cookies, service_type, service_name, confi
 
 def delete_service(ng1_host, service_name, headers, cookies):
     service_uri = "/ng1api/ncm/services/"
-    url = "https://" + ng1_host + service_uri + service_name
+    url = ng1_host + service_uri + service_name
     # Perform the HTTPS API Delete call by passing the service_name.
     # This will delete the specific service configuration for this service_name.
     delete = requests.delete(url, headers=headers, verify=False, cookies=cookies)
@@ -1234,7 +1278,7 @@ def delete_service(ng1_host, service_name, headers, cookies):
 
 def get_devices(ng1_host, headers, cookies):
     device_uri = "/ng1api/ncm/devices/"
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1255,7 +1299,7 @@ def get_devices(ng1_host, headers, cookies):
 
 def get_device(ng1_host, device_name, headers, cookies):
     device_uri = "/ng1api/ncm/device/"
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1276,7 +1320,7 @@ def get_device(ng1_host, device_name, headers, cookies):
 
 def get_device_interfaces(ng1_host, headers, cookies, device_name):
     device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces"
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1297,7 +1341,7 @@ def get_device_interfaces(ng1_host, headers, cookies, device_name):
 
 def get_device_interface(ng1_host, headers, cookies, device_name, interface_id):
     device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces/" + interface_id
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     #params = interface_id
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
@@ -1319,7 +1363,7 @@ def get_device_interface(ng1_host, headers, cookies, device_name, interface_id):
 
 def get_device_interface_locations(ng1_host, device_name, interface_id, headers, cookies):
     device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces/" + interface_id + "/locations"
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1340,7 +1384,7 @@ def get_device_interface_locations(ng1_host, device_name, interface_id, headers,
 
 def get_device_interface_location(ng1_host, device_name, interface_id, location_name, headers, cookies):
     device_uri = "/ng1api/ncm/devices/" + device_name + "/interfaces/" + interface_id + "/locations/" + location_name
-    url = "https://" + ng1_host + device_uri
+    url = ng1_host + device_uri
     # perform the HTTPS API call to get the device information
     get = requests.get(url, headers=headers, verify=False, cookies=cookies)
 
@@ -1361,7 +1405,7 @@ def get_device_interface_location(ng1_host, device_name, interface_id, location_
 
 def update_device(ng1_host, device_name, attribute, attribute_value, headers, cookies):
     device_uri = "/ng1api/ncm/devices/"
-    url = "https://" + ng1_host + device_uri + device_name
+    url = ng1_host + device_uri + device_name
     device_data = get_device(ng1_host, device_name, headers, cookies)
 
     # update the specific attribute within device_data with the attribute_value
@@ -1506,11 +1550,6 @@ with open(cred_filename, 'r') as cred_in:
     ng1destination = lines[5].partition('=')[2].rstrip("\n")
     ng1destPort = lines[6].partition('=')[2].rstrip("\n")
 
-# This ng1 host IP address is for San Jose lab nG1.
-# ng1_host = "10.8.8.3"
-# This ng1 host IP address is for the F5 lab nG1.
-# ng1_host = "54.185.154.36"
-
 # You can use your username and password (plain text) in the authorization header (basic authentication).
 # In this case cookies must be set to 'Null'.
 # If you are using the authentication Token, then credentials = 'Null'.
@@ -1535,8 +1574,15 @@ else:
     credentials = ng1username + ':' + ng1password_pl
 
 # set ng1_host to what was read out of the credentials .ini file.
-# ng1_host = ng1destination + ':' + ng1destPort.
-ng1_host = ng1destination
+if ng1destPort == '80' or ng1destPort == '8080':
+    web_protocol = 'http://'
+elif ng1destPort == '443' or ng1destPort == '8443':
+    web_protocol = 'https://'
+else:
+    print(f'nG1 destination port {ng1destPort} is not equal to 80, 8080, 443 or 8443')
+    print('Exiting...')
+    exit()
+ng1_host = web_protocol + ng1destination + ':' + ng1destPort
 
 # specify the headers to use in the API calls.
 headers = {
