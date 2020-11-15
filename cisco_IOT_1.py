@@ -97,7 +97,7 @@ def build_device_list(current_datacenters_filename):
                             # Add the interface number to the device_list to use later when creating network services.
                             device_list[device_name][1]['interfaces'][interface_count][interface_name][0]['interfaceNumber'] = interface_number
                             interface_alias = str(device_interface['alias'])
-                            # Add the interface number to the device_list to use later when creating network services.
+                            # Add the interface alias to the device_list to use later when creating network services.
                             device_list[device_name][1]['interfaces'][interface_count][interface_name][0]['alias'] = interface_alias
                             # Fetch all the APNs associated to this interface.
                             apn_data = get_apns_on_an_interface(ng1_host, headers, cookies, device_name, interface_number)
@@ -120,7 +120,6 @@ def build_device_list(current_datacenters_filename):
         for datacenter in datacenter_configs["Data Centers"]:
             datacenter_name = datacenter["name"]
             datacenter_list.append(datacenter_name)
-
         return device_list, datacenter_list
 
     else: # The mapping file was empty or there was some other exception in reading the data in.
@@ -139,18 +138,28 @@ def build_valid_dc_and_gateway_lists(apn_entry_list, datacenter_list, device_lis
         valid_gateways.append({apn_entry:[]})
         for datacenter in datacenter_list:
             for device_name in device_list:
-                if datacenter[:2].upper() == device_name[:2].upper(): # Look for APN associations in this datacenter.
-                    interface_loop_counter = 0
-                    for key, value in device_list[device_name][1]['interfaces'][interface_loop_counter].items():
-                        gateway = key
-                        gateway_apns = value[0]['APNs']
+                dc_acronym = translate_dc_name_to_acronym(datacenter) # Get the 3 letter acronym for this DC.
+                if dc_acronym == device_name[:3].upper(): # Only include devices within this DC.
+                    # Loop through all the interfaces for this device.
+                    for interface in device_list[device_name][1]['interfaces']:
+                        # Pull out just the interface dictionary values for each interface in the loop.
+                        interface_values = list(interface.values())[0][0]
+                        # The gateway name is really the assigned 'alias' attribute.
+                        gateway = interface_values['alias']
+                        # Get the list of APNs associated to this interface.
+                        gateway_apns = interface_values['APNs']
+                        # Check if this APN is in this list of APNs for this gateway.
                         if apn_entry in gateway_apns:
+                            # We have a match, include this gateway into the list of valid gateways...
+                            # for this APN. We will show them this list in the user menu later.
                             valid_gateways[apn_loop_counter][apn_entry].append(gateway)
+                            # If we have not already added this datacenter to the list of valid datacenters...
+                            # then add it now. We will show them this list in the user menu later.
                             if datacenter not in valid_datacenters[apn_loop_counter][apn_entry]:
                                 valid_datacenters[apn_loop_counter][apn_entry].append(datacenter)
                         else:
                             apn_entry_in_gateway = False
-                        interface_loop_counter += 1
+
         apn_loop_counter += 1 # Needed to walk to the next APN in the list of APN dictionaries.
     return valid_datacenters, valid_gateways
 
@@ -344,7 +353,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_list, app_servi
                                                 'networkDomainName': network_service,
                                                 'protocolOrGroupCode': protocol_or_group_code})
                 # Create the new application service.
-                create_service(ng1_host, headers, cookies, 'Null', application_service_name, app_srv_config_data, False)
+                create_service(ng1_host, headers, cookies, application_service_name, app_srv_config_data, False)
                 # We need to know the id number that was assigned to this new app service, so we get_service_detail on it.
                 app_srv_config_data = get_service_detail(ng1_host, application_service_name, headers, cookies)
                 #print(f'\nApp service config data is: {app_srv_config_data}')
@@ -371,13 +380,15 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
                 # We need to pull interface details from the device list to populate service member attributes.
                 for device_interface_data in device_list[device][1]['interfaces']: # For each interface on each device.
                     for device_interface in device_interface_data:
+                        # The gateway is really the interface 'alias' attribute, so pull that out of device_interface_data.
+                        device_interface_gateway = device_interface_data[device_interface][0]['alias']
                         # Filter the global list of interfaces down to just those that are both associated...
                         # to the APN we are looping on and the datacenter name we are looping on.
                         # In other words, any interface in this datacenter that is also associated to this APN.
-                        if device_interface in valid_gateway_list_for_this_APN and dc_acronym in device_interface:
-                            gateway = device_interface
+                        if device_interface_gateway in valid_gateway_list_for_this_APN and dc_acronym in device_interface_gateway:
                             interface_number = device_interface_data[device_interface][0]['interfaceNumber']
                             interface_alias = device_interface_data[device_interface][0]['alias']
+                            gateway = device_interface_gateway
                             network_service_name = dc_acronym + '-NWS-' + apn_name + '-' + gateway
 
                             # Initialize the dictionay that we will use to build up our network service definition.
@@ -403,7 +414,7 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
                             'meName': device_interface})
 
                             # Create the new network service.
-                            create_service(ng1_host, headers, cookies, 'Null', network_service_name, net_srv_config_data, False)
+                            create_service(ng1_host, headers, cookies, network_service_name, net_srv_config_data, False)
                             # We need to know the id number that was assigned to this new network service, so we get_service_detail on it.
                             net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
                             net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
@@ -447,11 +458,13 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_lis
                 # We need to pull interface details from the device list to populate service member attributes.
                 for device_interface_data in device_list[device][1]['interfaces']: # For each interface on each device.
                     for device_interface in device_interface_data:
+                        # The gateway is really the interface 'alias' attribute, so pull that out of device_interface_data.
+                        device_interface_gateway = device_interface_data[device_interface][0]['alias']
                         # Filter the global list of interfaces down to just those that are both associated...
                         # to the APN we are looping on and the datacenter name we are looping on.
                         # In other words, any interface in this datacenter that is also associated to this APN.
 
-                        if device_interface in valid_gateway_list_for_this_APN and dc_acronym in device_interface:
+                        if device_interface_gateway in valid_gateway_list_for_this_APN and dc_acronym in device_interface_gateway:
                             interface_number = device_interface_data[device_interface][0]['interfaceNumber']
                             interface_alias = device_interface_data[device_interface][0]['alias']
                             net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
@@ -464,7 +477,7 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_lis
                             'meAlias': interface_alias,
                             'meName': device_interface})
             # Create the new network service.
-            create_service(ng1_host, headers, cookies, 'Null', network_service_name, net_srv_config_data, False)
+            create_service(ng1_host, headers, cookies, network_service_name, net_srv_config_data, False)
             # We need to know the id number that was assigned to this new network service.
             net_srv_config_data = get_service_detail(ng1_host, network_service_name, headers, cookies)
             net_srv_id = net_srv_config_data['serviceDetail'][0]['id']
@@ -500,7 +513,6 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     while cust_entry_is_valid == False:
 
         user_entry = input("Please enter the new Customer Name: ")
-        print(f'User entry is; {user_entry}')
         if user_entry.lower() in [x.lower() for x in customer_list]:
             print(f"Customer: {user_entry} already exists")
             print("Please enter a customer that is not already in the list")
@@ -510,11 +522,12 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         else:
             break
 
-    if user_entry == '':
+    if user_entry == '': # For testing, allow the user just to hit enter for a default value.
         profile['name'] = 'Giles'
     elif user_entry.lower() == 'exit':
         exit()
     else:
+        user_entry = user_entry.title() # capitalize each word entered.
         profile['name'] = user_entry
 
     print('Please select the customer type:')
@@ -524,8 +537,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         user_entry = input('Enter 1 or 2: ').lower()
         if user_entry == 'exit':
             exit()
-        elif user_entry == '':
-            # For testing, allow the user to just hit enter
+        elif user_entry == '': # For testing, allow the user to just hit enter.
             profile['type'] = 'Connected Cars'
             break
         elif user_entry == '1':
@@ -541,7 +553,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     print("\nCurrent APNs available are: ")
     print(sorted(apn_list), '\n')
 
-    # Initialize an empty list to hold user entered APNs
+    # Initialize an empty list to hold user entered APNs.
     apn_entry_list = []
 
     # User enters one or more APNs.
@@ -551,8 +563,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             continue
         else:
             break
-    if user_entry == '':
-        # For testing, allow the user to just hit enter
+    if user_entry == '': # For testing, allow the user to just hit enter.
         apn_entry_list.append('Onstar01')
         apn_entry_list.append('Onstar02')
     elif user_entry.lower() == 'exit':
@@ -563,6 +574,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         # Remove any leading or trailing whitespace from list members.
         i = 0
         for apn_entry in apn_entry_list:
+            apn_entry = apn_entry.title() # capitalize each word in the entry list.
             apn_entry_list[i] = apn_entry.strip()
             i += 1
 
@@ -600,8 +612,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
                 continue
             else:
                 break
-        if user_entry == '':
-            # For testing, allow the user to just hit enter.
+        if user_entry == '': # For testing, allow the user to just hit enter.
             dc_entry_list = valid_datacenters_list
         elif user_entry.lower() == 'all':
             # User selects all of the valid datacenters listed.
@@ -614,6 +625,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             # Remove any leading or trailing whitespace from list members.
             i = 0
             for dc_entry in dc_entry_list:
+                dc_entry = dc_entry.title() # capitalize each word in the dc entry list.
                 dc_entry_list[i] = dc_entry.strip()
                 i += 1
 
@@ -643,8 +655,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
                     continue
                 else:
                     break
-            if user_entry == '':
-                # For testing, allow the user to just hit enter.
+            if user_entry == '': # For testing, allow the user to just hit enter.
                 gateway_entry_list = filtered_gateways_list
             elif user_entry.lower() == 'exit':
                 exit()
@@ -653,14 +664,14 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             else:
                 # If more than one gateway is entered, split the string into a list of gateways.
                 gateway_entry_list = user_entry.split(',')
-                # Remove any leading or trailing whitespace from list members.
                 i = 0
                 for gateway_entry in gateway_entry_list:
-                    gateway_entry_list[i] = gateway_entry.strip()
+                    gateway_entry = gateway_entry.upper() # make sure the whole entery is in caps.
+                    gateway_entry_list[i] = gateway_entry.strip() # Remove leading or trailing whitespace.
                     i += 1
             # Check to make sure that what the user entered is in the list of valid gateways.
             for gateway_entry in gateway_entry_list:
-                if gateway_entry.upper() not in valid_gateways_list: # Allow entry of
+                if gateway_entry not in valid_gateways_list: # Check if this gateway has this APN associated with it.
                     print(f"[CRITICAL] Gateway: {gateway_entry} is not in the list of valid gateways {valid_gateways_list}")
                     print(f"Please create Gateway: {gateway_entry} first and then run this program again")
                     print("No nG1 modifications will be made. Exiting...")
@@ -672,7 +683,6 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         apn_loop_counter += 1
 
     #print(f'\nCustomer profile is: {profile}')
-    # Initialize an emplty list to hold gateways for each APN for printing out an easy to read list.
 
     print('-------------------------------------------')
     print('Confirm new customer profile:')
@@ -1090,40 +1100,39 @@ def get_service_detail(ng1_host, service_name, headers, cookies):
 
         return False
 
-def create_service(ng1_host, headers, cookies, service_type, service_name, config_data, save):
+def create_service(ng1_host, headers, cookies, service_name, config_data, save):
     # Create a new service using the config_data attributes passed into the function.
-    # Optionally write a copy of the config to a json file
-
-    # Set the config_type to create_service in case we are saving this to a json file
-    config_type = 'create_service'
+    # Optionally write a copy of the config to a json file if 'save' is equal to True.
 
     service_uri = "/ng1api/ncm/services/"
 
     url = ng1_host + service_uri
 
-    # if the save option is True, then save a copy of this configuration to a json file
+    # if the save option is True, then save a copy of this configuration to a json file.
     if save == True:
         write_config_to_json(service_name + '.json', config_data)
-    # use json.dumps to provide a serialized json object (a string actually)
-    # this json_string will become our new configuration for this service_name
+    # use json.dumps to provide a serialized json object (a string actually).
+    # this json_string will become our new configuration for this service_name.
     json_string = json.dumps(config_data)
-    # print('New service data =')
-    # print(json_string)
 
-    # perform the HTTPS API Post call with the serialized json object service_data
-    # this will create the service configuration in nG1 for this config_filename (the new service_name)
+    # perform the HTTPS API Post call with the serialized json object service_data.
+    # This will create the service configuration in nG1 for this service_name.
     post = requests.post(url, headers=headers, data=json_string, verify=False, cookies=cookies)
 
-    if post.status_code == 200:
-        # success
-        print('[INFO] create_service', service_name, 'Successful')
+    if post.status_code == 200: # Create Service was successful.
+        print(f'[INFO] create_service: {service_name} Successful')
         return True
 
-    else:
-        print('[ERROR] create_service', service_name, 'Failed')
-        print('URL:', url)
-        print('Response Code:', post.status_code)
-        print('Response Body:', post.text)
+    else: # Create Service has failed.
+        # If the service exists, don't post an error message, just show as info.
+        # These services can be used by many customers without creating user specific services.
+        if 'exists' in post.text:
+            print(f'[INFO] create_service: {service_name}. Service already exists')
+        else:
+            print('[ERROR] create_service', service_name, 'Failed')
+            print('URL:', url)
+            print('Response Code:', post.status_code)
+            print('Response Body:', post.text)
 
         return False
 
