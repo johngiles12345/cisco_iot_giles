@@ -17,7 +17,7 @@ import logging
 requests.packages.urllib3.disable_warnings()
 
 def build_apn_ids_dict(profile):
-    apn_ids = {} #Initialize an empty dictionay to hold our APN Name : APN id key-value pairs.
+    apn_ids = {} #Initialize an empty dictionary to hold our APN Name : APN id key-value pairs.
     for apn in profile['APNs'][0]['APN']:
         apn_name = apn['name']
         apn_config = get_apn_detail(ng1_host, headers, cookies, apn_name)
@@ -28,6 +28,18 @@ def build_apn_ids_dict(profile):
             exit()
     return apn_ids
 
+def get_customer_apps_from_file(app_list_filename):
+    # Get info on all customer applications by reading from the current customers json file.
+    if os.path.isfile(app_list_filename):
+        app_configs = read_config_from_json(app_list_filename)
+        if app_configs != False: # The app json file was not empty.
+            return app_configs
+        else: # The application json file was empty or there was some other exception in reading the data in.
+            print(f'[CRITICAL] Unable to fetch Applications from {app_list_filename} file. Exiting...')
+            exit()
+    else:
+        print(f'[CRITICAL] Application list definition file: {app_list_filename} not found. Exiting...')
+        exit()
 
 def get_existing_customers_from_file(current_customers_filename):
     # Get info on all existing customers by reading from the current customers json file.
@@ -105,7 +117,7 @@ def build_device_list(current_datacenters_filename):
                                 print(f'[INFO] There are no APNs associated to interface {interface_number} on Device {device_name}')
                             else: # There is one or more APNs associated to this interface.
                                 for apn in apn_data['apnAssociations']:
-                                    # Add the APN to the interface attributes in our dictionay.
+                                    # Add the APN to the interface attributes in our dictionary.
                                     device_list[device_name][1]['interfaces'][interface_count][interface_name][0]['APNs'].append(apn)
                             # Increment the interface count for the next loop in case there is more than one.
                             interface_count += 1
@@ -183,11 +195,11 @@ def save_cust_config_to_file(customer_configs, new_customers_filename, current_c
         print(f"[INFO] Backing up file {current_customers_filename} to {old_customers_filename}")
         os.rename(new_customers_filename, current_customers_filename)
         print(f"[INFO] Renaming file {new_customers_filename} to {current_customers_filename}")
-        time.sleep(3)
+        #time.sleep(3)
     else:
         os.rename(new_customers_filename, current_customers_filename)
         print(f"[INFO] Renaming file {new_customers_filename} to {current_customers_filename}")
-        time.sleep(3)
+        #time.sleep(3)
 
     return True
 
@@ -276,25 +288,31 @@ def translate_dc_name_to_acronym(datacenter_name):
         return False
     return dc_acronym
 
-def create_app_services(ng1_host, headers, cookies, apn_ids, app_list, app_service_ids, net_service_ids, dc_entry_list):
-    # Create create the application services for GTPv0, GTPv1 and GTPv2 for each interface on each datacenter entered.
-    for apn_name in apn_ids:
-        for app_name in app_list:
-            protocol_or_group_code = app_name.partition('/')[2] # scrape off the protocol code after the '/'
-            app_name = app_name.partition('/')[0] # scrape off the app name before the '/'
-            for dc_entry in dc_entry_list:
+def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_service_ids, dc_entry_list):
+    # Create create the application services the apps passed in on the app_data dictionary.
+    # Create app service definitions for each APN on each valid gateway on each datacenter entered.
+    # Initialize an empty dictionary to hold the app service ID numbers. Add to this dict as we create app services.
+    app_service_ids = {}
+    for apn_name in apn_ids: # Loop through each APN the user entered.
+        for app in app_data['Applications']: # Loop through each app dictionary.
+            app_name = app['name']
+            if app['type'] == 'multi_member': #This is a list of app members, for example DNS.
+                protocol_or_group_code_list = app['member_list'] # Get the list of apps to place as service members.
+
+            for dc_entry in dc_entry_list: # Loop through each datacenter the user entered.
                 dc_acronym = translate_dc_name_to_acronym(dc_entry)
                 application_service_name = dc_acronym + '-AS-' + app_name + '-' + apn_name
 
-                # Initialize the dictionay that we will use to build up our application service definition.
+                # Initialize the dictionary that we will use to build up our application service definition.
                 app_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
                 'exclusionListID': -1,
                 'id': -1,
                 'isAlarmEnabled': False,
+                'serviceDefMonitorType': app['serviceDefMonitorType'],
                 'serviceName': application_service_name,
                 'serviceType': 1}]}
 
-                # Add members to the service that is each interface for each datacenter.
+                # Add members to the service that is each valid gateway for each datacenter.
                 app_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
                 # The protocol or group code for each service member is the app name limited to 10 chars.
                 if app_name == 'Web':
@@ -304,7 +322,6 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_list, app_servi
                     is_message_type = False
                     message_id = 0
                 elif app_name == 'DNS':
-                    protocol_or_group_code_list = ['DNS_TCP', 'A_DNS', 'DNSIX', 'UDP_MDNS', 'MS-DNS_U']
                     is_message_type = False
                     is_protocol_group = False
                     is_message_type = False
@@ -316,21 +333,19 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_list, app_servi
                     is_protocol_group = False
                 else:
                     is_message_type = True
-                    message_id = int(protocol_or_group_code.partition(':')[2])# Scrape off the message id after the ':'.
+                    protocol_or_group_code = app['message'] # This is a message-based app.
+                    message_id = app['message'].partition(':')[2]# Scrape off the message id after the ':'.
                     is_protocol_group = False
 
                 for network_service in net_service_ids:
-                    # Filter down the list of network_service_ids to just the interfaces for the current datacenter...
+                    # Filter down the list of network_service_ids to just the gateways for the current datacenter.
                     # loop and just those interfaces for the current APN loop. The goal is to create an app service...
                     # that is specific to an APN + datacenter combination and add the related interface network...
                     # services as members of this app service.
                     if 'All-' not in network_service and apn_name in network_service and network_service.startswith(application_service_name[:3]):
                         net_srv_id = net_service_ids[network_service]
-                        #print(f'\nNetwork Service is: {network_service}')
-                        #print(f'\nNetwork Service ID is: {net_srv_id}')
-                        #print(f'\nApplication Service Name is: {application_service_name}')
-                        if app_name == 'DNS': # We need to append a service member for each type of DNS app desired.
-                            for protocol_or_group_code in protocol_or_group_code_list:
+                        if app['type'] == 'multi_member': # We need to append a service member for each app listed.
+                            for protocol_or_group_code in protocol_or_group_code_list: # Loop through the list of apps.
                                 app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
                                                     'interfaceNumber': -1,
                                                     'isNetworkDomain': True,
@@ -341,7 +356,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_list, app_servi
                                                     'networkDomainID': net_srv_id,
                                                     'networkDomainName': network_service,
                                                     'protocolOrGroupCode': protocol_or_group_code})
-                        else: # This is not app_name 'DNS', so we only need one service member for the other applications
+                        else: # This is not a list of apps, so we only need one service member.
                             app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
                                                 'interfaceNumber': -1,
                                                 'isNetworkDomain': True,
@@ -391,7 +406,7 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
                             gateway = device_interface_gateway
                             network_service_name = dc_acronym + '-NWS-' + apn_name + '-' + gateway
 
-                            # Initialize the dictionay that we will use to build up our network service definition.
+                            # Initialize the dictionary that we will use to build up our network service definition.
                             net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
                             'exclusionListID': -1,
                             'id': -1,
@@ -444,7 +459,7 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_lis
             dc_acronym = translate_dc_name_to_acronym(dc_entry)
             network_service_name = dc_acronym + '-NWS-' + apn_name + '-All-GGSNs'
 
-            # Initialize the dictionay that we will use to build up our network service definition.
+            # Initialize the dictionary that we will use to build up our network service definition.
             net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
             'exclusionListID': -1,
             'id': -1,
@@ -507,11 +522,8 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     else:
         print("\nCustomers already input are: ")
         print(sorted(customer_list), '\n')
-
-    cust_entry_is_valid = False
     # User enters the customer name.
-    while cust_entry_is_valid == False:
-
+    while True:
         user_entry = input("Please enter the new Customer Name: ")
         if user_entry.lower() in [x.lower() for x in customer_list]:
             print(f"Customer: {user_entry} already exists")
@@ -527,7 +539,6 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     elif user_entry.lower() == 'exit':
         exit()
     else:
-        user_entry = user_entry.title() # capitalize each word entered.
         profile['name'] = user_entry
 
     print('Please select the customer type:')
@@ -574,7 +585,6 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         # Remove any leading or trailing whitespace from list members.
         i = 0
         for apn_entry in apn_entry_list:
-            apn_entry = apn_entry.title() # capitalize each word in the entry list.
             apn_entry_list[i] = apn_entry.strip()
             i += 1
 
@@ -625,7 +635,6 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             # Remove any leading or trailing whitespace from list members.
             i = 0
             for dc_entry in dc_entry_list:
-                dc_entry = dc_entry.title() # capitalize each word in the dc entry list.
                 dc_entry_list[i] = dc_entry.strip()
                 i += 1
 
@@ -790,7 +799,7 @@ def write_config_to_json(config_filename, config_data):
         return False
 
 def read_config_from_json(config_filename):
-    # The contents of the json config file are read into config_data, converted to a python dictionay object and returned
+    # The contents of the json config file are read into config_data, converted to a python dictionary object and returned
     try:
         with open(config_filename) as f:
             # decoding the JSON data to a python dictionary object
@@ -1220,6 +1229,94 @@ def get_device_interface_locations(ng1_host, device_name, interface_id, headers,
 
         return False
 
+def get_applications(ng1_host, headers, cookies):
+    uri = "/ng1api/ncm/applications/"
+    url = ng1_host + uri
+
+    # perform the HTTPS API call to get the Services information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_applications Successful')
+
+        # return the json object that contains the Services information
+        return get.json()
+
+    else:
+        print('[FAIL] get_applications Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
+def get_app_detail(ng1_host, headers, cookies, app_name):
+    uri = "/ng1api/ncm/applications/"
+    url = ng1_host + uri + app_name
+
+    # perform the HTTPS API call to get the Service information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_app_detail Successful')
+
+        # return the json object that contains the Service information
+        return get.json()
+
+    else:
+        print('[FAIL] get_app_detail Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
+def get_messages(ng1_host, headers, cookies, app_name):
+    uri = "/ng1api/ncm/applications/" + app_name + "/messages"
+    url = ng1_host + uri
+
+    # perform the HTTPS API call to get the App Messages information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_messages Successful')
+
+        # return the json object that contains the Services information
+        return get.json()
+
+    else:
+        print('[FAIL] get_messages Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
+def get_message_detail(ng1_host, headers, cookies, app_name, message_name):
+    uri = "/ng1api/ncm/applications/" + app_name + "/messages/" + message_name
+    url = ng1_host + uri
+
+    # perform the HTTPS API call to get the app message information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print('[INFO] get_message_detail Successful')
+
+        # return the json object that contains the Service information
+        return get.json()
+
+    else:
+        print('[FAIL] get_message_detail Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
 # ---------- Code Driver section below ----------------------------------------
 
 now = datetime.now()
@@ -1316,6 +1413,8 @@ cookies = open_session(ng1_host, headers, cookies, credentials)
 
 # Hardcoding the name of the master datacenter to gateways mapping json file.
 current_datacenters_filename = 'CiscoIOT-DataCenters.json'
+# Hardcoding the name of the master customer applications list json file.
+app_list_filename = 'CiscoIOT-AppList.json'
 
 # Build a device list for active Infinistreams/vStreams in the system.
 # For each, include a list of active interfaces.
@@ -1328,7 +1427,6 @@ new_customers_filename = customers_filename + '_new.json' # The name of the new 
 old_customers_filename = customers_filename + '_old.json' # The name of the backup customer definition json file we will create.
 
 # Get info on all existing customers
-# Initialize an empty customer list that we will use later to verify user input.
 customer_configs, customer_list = get_existing_customers_from_file(current_customers_filename)
 
 # Fetch the existing domain tree data so that we know what domains already exist.
@@ -1342,17 +1440,16 @@ if customer_domains_missing != []: # There are missing customer domains.
     print(f'[Warning] There are customers in the {current_customers_filename} that are not in the current domain tree')
     print(f'[Warning] Customers in {current_customers_filename} with no domains are: {customer_domains_missing}')
     while True:
-        input = input('Continue? y or n: ')
-        if input.lower() == 'n':
+        user_input = input('Continue? y or n: ')
+        if user_input.lower() == 'n':
             exit()
-        elif input.lower() == 'y':
+        elif user_input.lower() == 'y':
             break
         else:
             print("Invalid input. Please enter 'y' or 'n'")
             continue
 else:
     print(f'[INFO] Customers in {current_customers_filename} all have verified domains in the system')
-
 # Initialize an empty apn list that we will use later to verify user input.
 apn_list = []
 # Get info on all APN locations system-wide.
@@ -1399,16 +1496,14 @@ net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, apn_id
 # Add the network service ids for each network service created to our net_service_ids dictionary.
 net_service_ids = create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_list, profile, net_service_ids, dc_entry_list)
 
-# This is a hardcoded list of existing applications we intend to use. We really should be pulling this from a template file.
-app_list = ['GTPv0/', 'GTPv1-Create-PDP/GTP_V1C:65538', 'GTPv1-Update-PDP/GTP_V1C:65546', 'GTPv1-Delete-PDP/GTP_V1C:65539', 'GTPv2-CSR/GTP_V2C:131081',
-           'GTPv2-UBR/GTP_V2C:131104', 'GTPv2-MBR/GTP_V2C:131096', 'GTPv2-DSR/GTP_V2C:131087', 'Web/', 'DNS/']
+# Get info on all customer applications from a json file and put it into the app_data dictionary.
+app_data = get_customer_apps_from_file(app_list_filename)
 
-# Initialize an empty dictionary to hold the name:id key, value pairs for each app service we create.
-# We will use this later to add members to the dashboard domains that we create.
-app_service_ids = {}
-# Now create create the application services for all apps defined in the app_list for each APN the user entered.
+# Now create create the application services for all apps defined in the app_data for each APN the user entered.
+# The app_service_ids list that is returned will become members of domains as we create them.
+# Therefore we need the id numbers to do that assignment.
 # Use the network services we already created as members for the app service definitions.
-app_service_ids = create_app_services(ng1_host, headers, cookies, apn_ids, app_list, app_service_ids, net_service_ids, dc_entry_list)
+app_service_ids = create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_service_ids, dc_entry_list)
 
 domain_name = 'Cisco IOT'
 # This is a domain layer that is common to all customers. If it exists, don't overwrite it.
@@ -1553,7 +1648,7 @@ for apn_name in apn_ids:
 
 # Add the new customer profile to the current customer config profile dictionary.
 customer_configs['Customers'].append(profile)
-# Name the file that we want to write the new customer config profile dictionay to.
+# Name the file that we want to write the new customer config profile dictionary to.
 config_filename = new_customers_filename
 # Save the new customer config profile dictionary to the new customer new_customers_filename file
 save_cust_config_to_file(customer_configs, new_customers_filename, current_customers_filename, old_customers_filename)
