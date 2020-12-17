@@ -25,7 +25,7 @@ def build_apn_ids_dict(profile):
             apn_ids[apn_name] = apn_config['id']
         else:
             print(f'[CRITICAL] Unable to fetch APN ID number for {apn_name}. Exiting...')
-            exit()
+            sys.exit()
     return apn_ids
 
 def get_customer_apps_from_file(app_list_filename):
@@ -36,10 +36,10 @@ def get_customer_apps_from_file(app_list_filename):
             return app_configs
         else: # The application json file was empty or there was some other exception in reading the data in.
             print(f'[CRITICAL] Unable to fetch Applications from {app_list_filename} file. Exiting...')
-            exit()
+            sys.exit()
     else:
         print(f'[CRITICAL] Application list definition file: {app_list_filename} not found. Exiting...')
-        exit()
+        sys.exit()
 
 def get_existing_customers_from_file(current_customers_filename):
     # Get info on all existing customers by reading from the current customers json file.
@@ -54,7 +54,7 @@ def get_existing_customers_from_file(current_customers_filename):
                 customer_list.append(customer_name)
         else: # The mapping file was empty or there was some other exception in reading the data in.
             print(f'[CRITICAL] Unable to fetch Customers from {current_customers_filename}.json file. Exiting...')
-            exit()
+            sys.exit()
     else:
         print(f'[INFO] Current customer definition file: {current_customers_filename} not found')
         print('[INFO] A new Customer definition file will be created')
@@ -91,7 +91,7 @@ def build_device_list(current_datacenters_filename):
                     device_interfaces = get_device_interfaces(ng1_host, headers, cookies, device_name)
                     if device_interfaces == False: # Failed to get device interfaces.
                         print(f'[CRITICAL] Unable to fetch interfaces from {device_name}. Exiting....')
-                        exit()
+                        sys.exit()
                     else: # get device interfaces was successful.
                         # Pull out the interface list from the device_interfaces data.
                         device_interfaces = device_interfaces['interfaceConfigurations']
@@ -136,7 +136,7 @@ def build_device_list(current_datacenters_filename):
 
     else: # The mapping file was empty or there was some other exception in reading the data in.
         print(f'[CRITICAL] Unable to fetch Datacenters from {current_datacenters_filename} file. Exiting....')
-        exit()
+        sys.exit()
 
 
 def build_valid_dc_and_gateway_lists(apn_entry_list, datacenter_list, device_list):
@@ -288,7 +288,7 @@ def translate_dc_name_to_acronym(datacenter_name):
         return False
     return dc_acronym
 
-def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_service_ids, dc_entry_list):
+def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_service_ids, dc_entry_list, GTP_Baseline_profile_id):
     # Create create the application services the apps passed in on the app_data dictionary.
     # Create app service definitions for each APN on each valid gateway on each datacenter entered.
     # Initialize an empty dictionary to hold the app service ID numbers. Add to this dict as we create app services.
@@ -307,7 +307,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
                 app_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
                 'exclusionListID': -1,
                 'id': -1,
-                'isAlarmEnabled': False,
+                'isAlarmEnabled': True,
                 'serviceDefMonitorType': app['serviceDefMonitorType'],
                 'serviceName': application_service_name,
                 'serviceType': 1}]}
@@ -321,21 +321,25 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
                     is_protocol_group = True
                     is_message_type = False
                     message_id = 0
+                    app_srv_config_data['serviceDetail'][0]['alertProfileID'] = Web_Group_Baseline_profile_id
                 elif app_name == 'DNS':
                     is_message_type = False
                     is_protocol_group = False
                     is_message_type = False
                     message_id = 0
+                    app_srv_config_data['serviceDetail'][0]['alertProfileID'] = DNS_Baseline_profile_id
                 elif app_name == 'GTPv0':
                     protocol_or_group_code = 'GTP'
                     is_message_type = False
                     message_id = 0
                     is_protocol_group = False
+                    app_srv_config_data['serviceDetail'][0]['alertProfileID'] =  GTP_Baseline_profile_id
                 else:
                     is_message_type = True
                     protocol_or_group_code = app['message'] # This is a message-based app.
                     message_id = app['message'].partition(':')[2]# Scrape off the message id after the ':'.
                     is_protocol_group = False
+                    app_srv_config_data['serviceDetail'][0]['alertProfileID'] =  GTP_Baseline_profile_id
 
                 for network_service in net_service_ids:
                     # Filter down the list of network_service_ids to just the gateways for the current datacenter.
@@ -346,7 +350,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
                         net_srv_id = net_service_ids[network_service]
                         if app['type'] == 'multi_member': # We need to append a service member for each app listed.
                             for protocol_or_group_code in protocol_or_group_code_list: # Loop through the list of apps.
-                                app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                                app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': True,
                                                     'interfaceNumber': -1,
                                                     'isNetworkDomain': True,
                                                     'isMessageType': is_message_type,
@@ -357,7 +361,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
                                                     'networkDomainName': network_service,
                                                     'protocolOrGroupCode': protocol_or_group_code})
                         else: # This is not a list of apps, so we only need one service member.
-                            app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                            app_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': True,
                                                 'interfaceNumber': -1,
                                                 'isNetworkDomain': True,
                                                 'isMessageType': is_message_type,
@@ -378,7 +382,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
 
     return app_service_ids
 
-def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, device_list, profile, net_service_ids, dc_entry_list):
+def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, device_list, profile, net_service_ids, dc_entry_list, ThroughPut_Baseline_profile_id):
     # Now create a network service for each interface (gateway) that the user specified.
     # The network service name is in the form of {datacenter_abbreviation}-NWS-{apn_name}-{gateway}.
     # We will use a counter to index each APN in the customer profile.
@@ -410,7 +414,8 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
                             net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
                             'exclusionListID': -1,
                             'id': -1,
-                            'isAlarmEnabled': False,
+                            'isAlarmEnabled': True,
+                            'alertProfileID': ThroughPut_Baseline_profile_id,
                             'serviceName': network_service_name,
                             'serviceType': 6}]}
 
@@ -418,7 +423,7 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
                             # Each network service is the combination of a single device interface and the APN location.
                             net_srv_config_data['serviceDetail'][0]['serviceMembers'] = []
 
-                            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': True,
                             'interfaceNumber': interface_number,
                             'ipAddress': device_list[device][0],
                             'locationKeyInfo': [{'asi1xType': '',
@@ -440,7 +445,7 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
     return net_service_ids
 
 
-def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_list, profile, net_service_ids, dc_entry_list):
+def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_list, profile, net_service_ids, dc_entry_list, ThroughPut_Baseline_profile_id):
     # This function will build network services that include all GGSNs (interfaces) for each APN on...
     # every valid datacenter. Datacenters are validated using the gateway_list as a filter.
     # The format for naming each network service is {datacenter_abbreviation}-NWS-{apn_name}-All-GGSNs.
@@ -463,7 +468,8 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_lis
             net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
             'exclusionListID': -1,
             'id': -1,
-            'isAlarmEnabled': False,
+            'isAlarmEnabled': True,
+            'alertProfileID': ThroughPut_Baseline_profile_id,
             'serviceName': network_service_name,
             'serviceType': 6}]}
             # Initialize an empty service members list to put all the gateways (interfaces) in.
@@ -482,7 +488,7 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_lis
                         if device_interface_gateway in valid_gateway_list_for_this_APN and dc_acronym in device_interface_gateway:
                             interface_number = device_interface_data[device_interface][0]['interfaceNumber']
                             interface_alias = device_interface_data[device_interface][0]['alias']
-                            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': False,
+                            net_srv_config_data['serviceDetail'][0]['serviceMembers'].append({'enableAlert': True,
                             'interfaceNumber': interface_number,
                             'ipAddress': device_list[device][0],
                             'locationKeyInfo': [{'asi1xType': '',
@@ -537,7 +543,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     if user_entry == '': # For testing, allow the user just to hit enter for a default value.
         profile['name'] = 'Giles'
     elif user_entry.lower() == 'exit':
-        exit()
+        sys.exit()
     else:
         profile['name'] = user_entry
 
@@ -547,7 +553,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
     while True:
         user_entry = input('Enter 1 or 2: ').lower()
         if user_entry == 'exit':
-            exit()
+            sys.exit()
         elif user_entry == '': # For testing, allow the user to just hit enter.
             profile['type'] = 'Connected Cars'
             break
@@ -578,7 +584,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         apn_entry_list.append('Onstar01')
         apn_entry_list.append('Onstar02')
     elif user_entry.lower() == 'exit':
-        exit()
+        sys.exit()
     else:
         # If more than one APN is entered, split the string into a list of APNs.
         apn_entry_list = user_entry.split(',')
@@ -595,7 +601,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             print(f"[CRITICAL] APN: {apn_entry} does not yet exist")
             print(f"Please create APN: {apn_entry} first and then run this program again")
             print("No nG1 modifications will be made. Exiting...")
-            exit()
+            sys.exit()
 
     # Build up a list of valid datatcenters where each entered APN is associated to one or more interfaces.
     # Build up a list of valid gateways where each entered APN is associated to one or more interfaces.
@@ -628,7 +634,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             # User selects all of the valid datacenters listed.
             dc_entry_list = valid_datacenters_list
         elif user_entry.lower() == 'exit':
-            exit()
+            sys.exit()
         else:
             # If more than one datacenter is entered, split the string into a list of datacenters.
             dc_entry_list = user_entry.split(',')
@@ -645,7 +651,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
                 print(f"[CRITICAL] Datacenter: {dc_entry} is not in the list of valid datacenters {valid_datacenters_list}")
                 print(f"Please create Datacenter: {dc_entry} first and then run this program again")
                 print("No nG1 modifications will be made. Exiting...")
-                exit()
+                sys.exit()
 
         # Produce a list of valid gateways that have the APN entered associated to them.
         # Only list those APN associated gateways (interfaces) for the user entered datacenters.
@@ -667,7 +673,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
             if user_entry == '': # For testing, allow the user to just hit enter.
                 gateway_entry_list = filtered_gateways_list
             elif user_entry.lower() == 'exit':
-                exit()
+                sys.exit()
             elif user_entry.lower() == 'all':
                 gateway_entry_list = filtered_gateways_list
             else:
@@ -684,7 +690,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
                     print(f"[CRITICAL] Gateway: {gateway_entry} is not in the list of valid gateways {valid_gateways_list}")
                     print(f"Please create Gateway: {gateway_entry} first and then run this program again")
                     print("No nG1 modifications will be made. Exiting...")
-                    exit()
+                    sys.exit()
 
             # Add the user entered Gateways to the customer profile dictionary.
             for gateway_entry in gateway_entry_list:
@@ -714,7 +720,7 @@ def customer_menu(ng1_host, headers, cookies, apn_list, datacenter_list, custome
         elif user_entry == 'n':
             return False, False
         elif user_entry == 'exit':
-            exit()
+            sys.exit()
         else:
             print("Invalid entry, please enter 'y' or 'n'")
             continue
@@ -723,10 +729,6 @@ def open_session(ng1_host, headers, cookies, credentials):
     open_session_uri = "/ng1api/rest-sessions"
     open_session_url = ng1_host + open_session_uri
 
-    #split the credentials string into two parts; username and password
-    ng1username = credentials.split(':')[0]
-    ng1password_pl = credentials.split(':')[1]
-
     # perform the HTTPS API call to open the session with nG1 and return a session cookie
     try:
         if credentials == 'Null':
@@ -734,12 +736,15 @@ def open_session(ng1_host, headers, cookies, credentials):
             post = requests.request("POST", open_session_url, headers=headers, verify=False, cookies=cookies)
         elif cookies == 'Null':
             # Null cookies tells us to use the credentials string. We will use this post and pass in the credentials string.
+            #split the credentials string into two parts; username and password
+            ng1username = credentials.split(':')[0]
+            ng1password_pl = credentials.split(':')[1]
             post = requests.request("POST", open_session_url, headers=headers, verify=False, auth=(ng1username, ng1password_pl))
         else:
             print(f'[CRITICAL] opening session to URL: {open_session_url} failed')
             print('Unable to determine authentication by credentials or token')
             print('Exiting the program now...')
-            exit()
+            sys.exit()
         if post.status_code == 200:
             # success
             print('[INFO] Opened Session Successfully')
@@ -755,14 +760,14 @@ def open_session(ng1_host, headers, cookies, credentials):
             print('Response Code:', post.status_code)
             print('Response Body:', post.text)
             print('Exiting the program now...')
-            exit()
+            sys.exit()
     except:
         # This means we likely did not reach the nG1 at all. Check your VPN connection.
         print('[CRITICAL] opening session failed')
         print(f'Cannot reach URL: {open_session_url}')
         print('Check your connection')
         print('Exiting the program now...')
-        exit()
+        sys.exit()
 
 def close_session(ng1_host, headers, cookies):
     close_session_uri = "/ng1api/rest-sessions/close"
@@ -947,7 +952,7 @@ def build_domain_tree(ng1_host, headers, cookies, domain_name, parent_domain_id,
                     parent_domain_id = domain['id']
     else:
         print(f'[CRITICAL] Unable to create domain: {domain_name} Exiting...')
-        exit()
+        sys.exit()
 
     return parent_domain_id
 
@@ -1317,6 +1322,28 @@ def get_message_detail(ng1_host, headers, cookies, app_name, message_name):
 
         return False
 
+def get_service_alert_profile(ng1_host, headers, cookies, profile_name):
+    uri = "/ng1api/ncm/servicealertprofiles/" + profile_name
+    url = ng1_host + uri
+
+    # perform the HTTPS API call to get the service alert profiles information
+    get = requests.get(url, headers=headers, verify=False, cookies=cookies)
+
+    if get.status_code == 200:
+        # success
+        print(f'[INFO] get_service_alert_profile for {profile_name} Successful')
+
+        # return the json object that contains the Services information
+        return get.json()
+
+    else:
+        print(f'[FAIL] get_service_alert_profile for {profile_name} Failed')
+        print('URL:', url)
+        print('Response Code:', get.status_code)
+        print('Response Body:', get.text)
+
+        return False
+
 # ---------- Code Driver section below ----------------------------------------
 
 now = datetime.now()
@@ -1335,7 +1362,12 @@ logger.info(f"*** Start of logs {date_time} ***")
 
 # Hardcoding the filenames for encrypted credentials and the key file needed to decrypt the credentials.
 cred_filename = 'CredFile.ini'
-ng1key_file = 'ng1key.key'
+os_type = sys.platform
+if os_type == 'linux':
+    ng1key_file = '.ng1key.key'
+else:
+    ng1key_file = 'ng1key.key'
+
 
 # Retrieve the decrypted credentials that we will use to open a session to nG1.
 try:
@@ -1344,7 +1376,7 @@ try:
         fng1 = Fernet(ng1key)
 except:
     print(f'[CRITICAL] Unable to open ng1key_file: {ng1key_file}. Exiting...')
-    exit()
+    sys.exit()
 try:
     with open(cred_filename, 'r') as cred_in:
         lines = cred_in.readlines()
@@ -1362,7 +1394,7 @@ try:
         ng1destPort = lines[6].partition('=')[2].rstrip("\n")
 except:
     print(f'[CRITICAL] Unable to open cred_filename: {cred_filename}. Exiting...')
-    exit()
+    sys.exit()
 
 # You can use your username and password (plain text) in the authorization header (basic authentication).
 # In this case cookies must be set to 'Null'.
@@ -1395,7 +1427,7 @@ elif ng1destPort == '443' or ng1destPort == '8443':
 else:
     print(f'[CRITICAL] nG1 destination port {ng1destPort} is not equal to 80, 8080, 443 or 8443')
     print('Exiting...')
-    exit()
+    sys.exit()
 ng1_host = web_protocol + ng1destination + ':' + ng1destPort
 
 # specify the headers to use in the API calls.
@@ -1415,6 +1447,33 @@ cookies = open_session(ng1_host, headers, cookies, credentials)
 current_datacenters_filename = 'CiscoIOT-DataCenters.json'
 # Hardcoding the name of the master customer applications list json file.
 app_list_filename = 'CiscoIOT-AppList.json'
+
+# We need the IDs of the alert profiles that we want to associate to the new services we will create.
+# I am hardcoding this section for now.
+profile_name = 'ThroughPut-Baseline'
+service_alert_profile = get_service_alert_profile(ng1_host, headers, cookies, profile_name)
+if service_alert_profile == False:
+    print('Exiting...')
+    sys.exit()
+ThroughPut_Baseline_profile_id = service_alert_profile['Id']
+profile_name = 'GTP-Baseline'
+service_alert_profile = get_service_alert_profile(ng1_host, headers, cookies, profile_name)
+if service_alert_profile == False:
+    print('Exiting...')
+    sys.exit()
+GTP_Baseline_profile_id = service_alert_profile['Id']
+profile_name = 'Web Group-Baseline'
+service_alert_profile = get_service_alert_profile(ng1_host, headers, cookies, profile_name)
+if service_alert_profile == False:
+    print('Exiting...')
+    sys.exit()
+Web_Group_Baseline_profile_id = service_alert_profile['Id']
+profile_name = 'DNS-Baseline'
+service_alert_profile = get_service_alert_profile(ng1_host, headers, cookies, profile_name)
+if service_alert_profile == False:
+    print('Exiting...')
+    sys.exit()
+DNS_Baseline_profile_id = service_alert_profile['Id']
 
 # Build a device list for active Infinistreams/vStreams in the system.
 # For each, include a list of active interfaces.
@@ -1442,7 +1501,7 @@ if customer_domains_missing != []: # There are missing customer domains.
     while True:
         user_input = input('Continue? y or n: ')
         if user_input.lower() == 'n':
-            exit()
+            sys.exit()
         elif user_input.lower() == 'y':
             break
         else:
@@ -1459,14 +1518,14 @@ if apn_configs != False:
     #print(f'apn_configs["apns"] are: {apn_configs["apns"]}')
     if apn_configs["apns"] == []: # get_apns was successful, but there were no apns in the system.
         print('[CRITICAL] There are no APNs configured in this system. Exiting...')
-        exit()
+        sys.exit()
     else:
         for apn in apn_configs["apns"]:
             apn_name = apn["name"]
             apn_list.append(apn_name)
 else:
     print('[CRITICAL] Unable to fetch APNs. Exiting....')
-    exit()
+    sys.exit()
 
 # Get the new customer profile from the user by presenting a menu.
 # Note that customer profiles do not actually include the list of datacenters the user selected.
@@ -1490,11 +1549,11 @@ apn_ids = build_apn_ids_dict(profile)
 net_service_ids = {}
 # Create a network service for each interface (gateway) that the user specified.
 # Add the network service ids for each network service created to our net_service_ids dictionary.
-net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, device_list, profile, net_service_ids, dc_entry_list)
+net_service_ids = create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, device_list, profile, net_service_ids, dc_entry_list, ThroughPut_Baseline_profile_id)
 
 # Create network services that include all GGSNs (interfaces) for each APN on every valid datacenter.
 # Add the network service ids for each network service created to our net_service_ids dictionary.
-net_service_ids = create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_list, profile, net_service_ids, dc_entry_list)
+net_service_ids = create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_list, profile, net_service_ids, dc_entry_list, ThroughPut_Baseline_profile_id)
 
 # Get info on all customer applications from a json file and put it into the app_data dictionary.
 app_data = get_customer_apps_from_file(app_list_filename)
@@ -1503,7 +1562,7 @@ app_data = get_customer_apps_from_file(app_list_filename)
 # The app_service_ids list that is returned will become members of domains as we create them.
 # Therefore we need the id numbers to do that assignment.
 # Use the network services we already created as members for the app service definitions.
-app_service_ids = create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_service_ids, dc_entry_list)
+app_service_ids = create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_service_ids, dc_entry_list, GTP_Baseline_profile_id)
 
 domain_name = 'Cisco IOT'
 # This is a domain layer that is common to all customers. If it exists, don't overwrite it.
