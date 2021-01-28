@@ -301,7 +301,8 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
 
             for dc_entry in dc_entry_list: # Loop through each datacenter the user entered.
                 dc_acronym = translate_dc_name_to_acronym(dc_entry)
-                application_service_name = dc_acronym + '-AS-' + app_name + '-' + apn_name
+                application_service_name = dc_acronym + '-AS-' + app_name + '-' + apn_name.replace(" ","_")
+#                application_service_name = dc_acronym + '-AS-' + app_name + '-' + apn_name
 
                 # Initialize the dictionary that we will use to build up our application service definition.
                 app_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
@@ -346,7 +347,7 @@ def create_app_services(ng1_host, headers, cookies, apn_ids, app_data, net_servi
                     # loop and just those interfaces for the current APN loop. The goal is to create an app service...
                     # that is specific to an APN + datacenter combination and add the related interface network...
                     # services as members of this app service.
-                    if 'All-' not in network_service and apn_name in network_service and network_service.startswith(application_service_name[:3]):
+                    if 'All-' not in network_service and apn_name.replace(" ","_") in network_service and network_service.startswith(application_service_name[:3]):
                         net_srv_id = net_service_ids[network_service]
                         if app['type'] == 'multi_member': # We need to append a service member for each app listed.
                             for protocol_or_group_code in protocol_or_group_code_list: # Loop through the list of apps.
@@ -408,7 +409,8 @@ def create_gateway_net_services(ng1_host, headers, cookies, apn_ids, apn_name, d
                             interface_number = device_interface_data[device_interface][0]['interfaceNumber']
                             interface_alias = device_interface_data[device_interface][0]['alias']
                             gateway = device_interface_gateway
-                            network_service_name = dc_acronym + '-NWS-' + apn_name + '-' + gateway
+                            network_service_name = dc_acronym + '-NWS-' + apn_name.replace(" ","_") + '-' + gateway
+#                            network_service_name = dc_acronym + '-NWS-' + apn_name + '-' + gateway
 
                             # Initialize the dictionary that we will use to build up our network service definition.
                             net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
@@ -462,7 +464,8 @@ def create_all_ggsns_net_service(ng1_host, headers, cookies, apn_ids, device_lis
 
         for dc_entry in dc_entry_list:
             dc_acronym = translate_dc_name_to_acronym(dc_entry)
-            network_service_name = dc_acronym + '-NWS-' + apn_name + '-All-GGSNs'
+            network_service_name = dc_acronym + '-NWS-' + apn_name.replace(" ","_") + '-All-GGSNs'
+#            network_service_name = dc_acronym + '-NWS-' + apn_name + '-All-GGSNs'
 
             # Initialize the dictionary that we will use to build up our network service definition.
             net_srv_config_data = {'serviceDetail': [{'alertProfileID': 2,
@@ -1147,6 +1150,7 @@ def create_service(ng1_host, headers, cookies, service_name, config_data, save):
             print('URL:', url)
             print('Response Code:', post.status_code)
             print('Response Body:', post.text)
+            print('JSON string', json_string)
 
         return False
 
@@ -1558,7 +1562,7 @@ net_service_ids = create_all_ggsns_net_service(ng1_host, headers, cookies, apn_i
 # Get info on all customer applications from a json file and put it into the app_data dictionary.
 app_data = get_customer_apps_from_file(app_list_filename)
 
-# Now create create the application services for all apps defined in the app_data for each APN the user entered.
+# Now create the application services for all apps defined in the app_data for each APN the user entered.
 # The app_service_ids list that is returned will become members of domains as we create them.
 # Therefore we need the id numbers to do that assignment.
 # Use the network services we already created as members for the app service definitions.
@@ -1614,7 +1618,7 @@ domain_member_ids = {} # Reset the list of domain members
 if len(apn_ids) == 1: # There is only one user entered APN name.
     for network_service_name in net_service_ids:
         for apn_name in apn_ids:
-            if apn_name + '-All-GGSNs' in network_service_name:
+            if apn_name.replace(" ","_") + '-All-GGSNs' in network_service_name:
                 domain_member_ids[network_service_name] = net_service_ids[network_service_name]
 # Create the customer domain using the customer name entered in the menu.
 # Make it a child domain of either IOT APNs or Connected Car APNs.
@@ -1628,7 +1632,7 @@ for apn_name in apn_ids:
         # Add the All GGSNs network services as members to this domain, but only include those that...
         # contain the APN name in this for loop.
         for network_service_name in net_service_ids:
-            if apn_name + '-All-GGSNs' in network_service_name:
+            if apn_name.replace(" ","_") + '-All-GGSNs' in network_service_name:
                 domain_member_ids[network_service_name] = net_service_ids[network_service_name]
         # Create the APN named domain including the All GGSNs network services as domain members.
         apn_parent_domain_id = build_domain_tree(ng1_host, headers, cookies, domain_name, customer_parent_domain_id, domain_member_ids)
@@ -1653,7 +1657,7 @@ for apn_name in apn_ids:
         domain_member_ids = {} # Reset the list of domain members
         # Look for any application service name that includes both the GTP app name, the APN name and the datacenter acronym.
         for application_service_name in app_service_ids:
-            if 'GTPv0' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+            if 'GTPv0' in application_service_name and dc_acronym in application_service_name and apn_name.replace(" ","_") in application_service_name:
                 domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
         domain_name = 'GTPv0' # Hardcoding the domain name based on the same list of apps for all customers.
@@ -1662,7 +1666,7 @@ for apn_name in apn_ids:
         domain_member_ids = {} # Reset the list of members.
         # Look for any application service name that includes both the GTP app name, the APN name and the datacenter acronym.
         for application_service_name in app_service_ids:
-            if 'GTPv1' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+            if 'GTPv1' in application_service_name and dc_acronym in application_service_name and apn_name.replace(" ","_") in application_service_name:
                 domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
         domain_name = 'GTPv1' # Hardcoding the domain name based on the same list of apps for all customers.
@@ -1671,7 +1675,7 @@ for apn_name in apn_ids:
         domain_member_ids = {} # Reset the list of members.
         # Look for any application service name that includes both the GTP app name, the APN name and the datacenter acronym.
         for application_service_name in app_service_ids:
-            if 'GTPv2' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+            if 'GTPv2' in application_service_name and dc_acronym in application_service_name and apn_name.replace(" ","_") in application_service_name:
                 domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
         domain_name = 'GTPv2' # Hardcoding the domain name based on the same list of apps for all customers.
@@ -1685,7 +1689,7 @@ for apn_name in apn_ids:
 
         # Look for any application service name that includes both the Web app name, the APN name and the datacenter acronym.
         for application_service_name in app_service_ids:
-            if 'Web' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+            if 'Web' in application_service_name and dc_acronym in application_service_name and apn_name.replace(" ","_") in application_service_name:
                 domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
     domain_name = 'User' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
@@ -1699,7 +1703,7 @@ for apn_name in apn_ids:
 
         # Look for any application service name that includes both the DNS app name, the APN name and the datacenter acronym.
         for application_service_name in app_service_ids:
-            if 'DNS' in application_service_name and dc_acronym in application_service_name and apn_name in application_service_name:
+            if 'DNS' in application_service_name and dc_acronym in application_service_name and apn_name.replace(" ","_") in application_service_name:
                 domain_member_ids[application_service_name] = app_service_ids[application_service_name]
 
     domain_name = 'DNS' # Hardcoding the domain name based on the same list of Control, User and DNS for all customers.
